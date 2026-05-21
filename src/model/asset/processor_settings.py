@@ -6,7 +6,6 @@ from src.model.asset.renewable import HourlyForecast, RenewableCapacity, Renewab
 from src.model.asset.storage import Storage
 from src.model.base.base_model import AppBaseModel
 
-
 class ProcessorSettingsSystem(AppBaseModel):
     """Aggregate root for all physical assets in the microgrid."""
     generators: List[Generator]

@@ -1,6 +1,6 @@
-from typing import List
+from typing import Dict, List
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from src.model.base.base_model import AppBaseModel
 
