@@ -1,8 +1,7 @@
-from dataclasses import dataclass
+from pydantic import BaseModel
 
 
-@dataclass
-class ChargingJob:
+class ChargingJob(BaseModel):
     """Represents a job assigned to charge a specific target storage."""
     job_id: str
     target_storage: str

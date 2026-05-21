@@ -1,8 +1,7 @@
-from dataclasses import dataclass
+from pydantic import BaseModel
 
 
-@dataclass
-class Generator:
+class Generator(BaseModel):
     """Represents a thermal power generator and its operational constraints."""
     generator_id: str
     output_min: int

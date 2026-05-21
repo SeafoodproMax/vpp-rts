@@ -1,4 +1,3 @@
-from dataclasses import dataclass
 from typing import Any, Dict, List
 
 from src.model.asset.charging_job import ChargingJob
@@ -8,7 +7,6 @@ from src.model.asset.storage import Storage
 from src.model.base.base_model import AppBaseModel
 
 
-@dataclass
 class ProcessorSettingsSystem(AppBaseModel):
     """Aggregate root for all physical assets in the microgrid."""
     generators: List[Generator]

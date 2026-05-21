@@ -1,23 +1,21 @@
-from dataclasses import dataclass
 from typing import List
 
+from pydantic import BaseModel
 
-@dataclass
-class RenewableCapacity:
+
+class RenewableCapacity(BaseModel):
     """Defines the maximum capacity of a renewable energy source."""
     renewable_id: str
     capacity: int
 
 
-@dataclass
-class HourlyForecast:
+class HourlyForecast(BaseModel):
     """A single hour forecast for renewable energy generation (percentage)."""
     hour: int
     pv_forecast: float
 
 
-@dataclass
-class RenewableForecast:
+class RenewableForecast(BaseModel):
     """Aggregate forecast for a specific renewable energy source."""
     renewable_id: str
     forecasts: List[HourlyForecast]

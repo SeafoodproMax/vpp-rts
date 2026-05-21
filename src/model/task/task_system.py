@@ -1,11 +1,9 @@
-from dataclasses import dataclass
 from typing import Any, Dict, List
 
 from src.model.base.base_model import AppBaseModel
 from src.model.task.rt_task import AperiodicTask, PeriodicTask, SporadicTask
 
 
-@dataclass
 class TaskSystem(AppBaseModel):
     """Aggregate root for all real-time scheduling tasks."""
     periodic_tasks: List[PeriodicTask]

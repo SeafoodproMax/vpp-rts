@@ -1,9 +1,10 @@
 import json
-from abc import ABC, abstractmethod
 from typing import Any, Dict
 
+from pydantic import BaseModel
 
-class AppBaseModel(ABC):
+
+class AppBaseModel(BaseModel):
     """
     Base model for all data structures in the VPP-RTS project.
     Provides generic JSON loading capability.
@@ -14,13 +15,7 @@ class AppBaseModel(ABC):
         """Reads a JSON file and parses it into the model object."""
         with open(filepath, "r", encoding="utf-8") as f:
             data = json.load(f)
-        return cls._parse(data)
-
-    @classmethod
-    @abstractmethod
-    def _parse(cls, data: Dict[str, Any]) -> "AppBaseModel":
-        """
-        Abstract method to be implemented by child classes
-        to parse the raw dictionary into an object instance.
-        """
-        pass
+        # If the subclass has a custom _parse method, use it; otherwise unpack directly
+        if hasattr(cls, "_parse") and callable(getattr(cls, "_parse")):
+            return cls._parse(data)
+        return cls(**data)

@@ -1,8 +1,7 @@
-from dataclasses import dataclass
+from pydantic import BaseModel
 
 
-@dataclass
-class Storage:
+class Storage(BaseModel):
     """Represents an energy storage system (battery) and its constraints."""
     storage_id: str
     soc_min: int

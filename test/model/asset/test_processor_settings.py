@@ -6,7 +6,7 @@ from src.model.asset.processor_settings import ProcessorSettingsSystem
 def test_processor_settings_load():
     """Test loading ProcessorSettingsSystem from the actual input JSON."""
     current_dir = os.path.dirname(__file__)
-    project_root = os.path.abspath(os.path.join(current_dir, "../../../.."))
+    project_root = os.path.abspath(os.path.join(current_dir, "../../.."))
     json_path = os.path.join(project_root, "input", "processor_settings.json")
     
     settings = ProcessorSettingsSystem.load_from_json(json_path)
