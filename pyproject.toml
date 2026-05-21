@@ -1,0 +1,19 @@
+[tool.poetry]
+name = "vpp-rts"
+version = "0.1.0"
+description = "VPP Real-Time System task set generator"
+authors = ["Seafood_pro <goodbilllin@gmail.com>"]
+readme = "README.md"
+packages = [{include = "src"}]
+
+[tool.poetry.dependencies]
+python = "^3.12"
+pydantic = "^2.13.4"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^9.0.3"
+pygments = "^2.20.0"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry-core.masonry.api"
