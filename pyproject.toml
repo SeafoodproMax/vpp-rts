@@ -14,6 +14,9 @@ pydantic = "^2.13.4"
 pytest = "^9.0.3"
 pygments = "^2.20.0"
 
+[tool.poetry.scripts]
+main = "src.main:main"
+
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry-core.masonry.api"
