@@ -1,6 +1,6 @@
 import json
 import os
-from src.generator.task_generator import TaskSetGenerator
+from src.generator import TaskSetGenerator
 
 def main():
     generator = TaskSetGenerator()
