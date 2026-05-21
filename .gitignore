@@ -222,3 +222,9 @@ __marimo__/
 
 # VS Code
 .vscode/
+
+# Ignore everything inside the output folder
+output/*
+
+# But do not ignore the .gitkeep file
+!output/.gitkeep
