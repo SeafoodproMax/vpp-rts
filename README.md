@@ -4,7 +4,7 @@ NCKU Real-Time Systems homework — generates a valid periodic task set for a Vi
 
 ## Quick start
 
-> Requires Python 3.12+ and [Poetry](https://python-poetry.org/). See [Prerequisites](#prerequisites) if not installed.
+> Requires [Python 3.12+](https://www.python.org/downloads/release/python-3120/) and [Poetry](https://python-poetry.org/).
 
 ```bash
 poetry install
@@ -34,33 +34,6 @@ Each task has the following fields:
 | `preempt` | `1` = preemptible, `0` = non-preemptive |
 
 Output is written to `output/task_set.json`.
-
-## Prerequisites
-
-- Python 3.12+
-- [Poetry](https://python-poetry.org/)
-
-### Installing Poetry
-
-**macOS / Linux**
-```bash
-curl -sSL https://install.python-poetry.org | python3 -
-```
-
-**Windows (PowerShell)**
-```powershell
-(Invoke-WebRequest -Uri https://install.python-poetry.org -UseBasicParsing).Content | python -
-```
-
-After installation, make sure `poetry` is in your PATH:
-
-**macOS / Linux** — add to `~/.bashrc` or `~/.zshrc`:
-```bash
-export PATH="$HOME/.local/bin:$PATH"
-```
-**Windows** — add `%APPDATA%\Python\Scripts` to your system PATH.
-
-
 
 ## Project structure
 
