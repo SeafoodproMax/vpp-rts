@@ -9,6 +9,7 @@ packages = [{include = "src"}]
 [tool.poetry.dependencies]
 python = "^3.12"
 pydantic = "^2.13.4"
+pulp = "^2.9"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^9.0.3"
@@ -16,6 +17,7 @@ pygments = "^2.20.0"
 
 [tool.poetry.scripts]
 main = "src.main:main"
+scheduler = "src.scheduler:main"
 
 [build-system]
 requires = ["poetry-core"]
