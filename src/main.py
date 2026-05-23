@@ -1,7 +1,7 @@
 import os
 
 from src.generator import TaskSetGenerator
-from src.scheduler import Scheduler
+from src.rt_scheduler import RTScheduler
 from src.utils import JsonIO
 
 _TASK_SET_PATH = os.path.join("output", "task_set.json")
@@ -36,7 +36,7 @@ def run_scheduler(task_set_path: str = _TASK_SET_PATH) -> dict:
     Returns:
         Scheduler output containing schedule_result and reserve.
     """
-    scheduler = Scheduler(task_set_path=task_set_path)
+    scheduler = RTScheduler(task_set_path=task_set_path)
     result = scheduler.run()
 
     JsonIO.save({"schedule_result": result["schedule_result"]}, _SCHEDULE_PATH)

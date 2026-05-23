@@ -17,7 +17,6 @@ pygments = "^2.20.0"
 
 [tool.poetry.scripts]
 main = "src.main:main"
-scheduler = "src.scheduler:main"
 
 [build-system]
 requires = ["poetry-core"]

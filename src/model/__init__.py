@@ -11,6 +11,7 @@ from src.model.base.base_model import AppBaseModel
 from src.model.market.price import PriceRecord, PriceSystem
 
 from src.model.task.rt_task import AperiodicTask, BaseRTTask, PeriodicTask, SporadicTask
+from src.model.task.expanded_job import ExpandedJob
 from src.model.task.task_system import TaskSystem
 
 __all__ = [
@@ -32,5 +33,6 @@ __all__ = [
     "BaseRTTask",
     "PeriodicTask",
     "SporadicTask",
+    "ExpandedJob",
     "TaskSystem",
 ]

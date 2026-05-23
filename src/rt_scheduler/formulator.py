@@ -1,149 +1,68 @@
-from __future__ import annotations
-
-from typing import Any, Optional
+"""PuLP MILP formulation for the Virtual Power Plant scheduling problem."""
 
 import pulp
-from pydantic import BaseModel
-
-from src.model.asset.processor_settings import ProcessorSettingsSystem
-from src.model.asset.generator import Generator
-from src.model.asset.storage import Storage
-from src.model.market.price import PriceSystem
-from src.model.task.task_system import TaskSystem
-from src.utils.file_io import JsonIO
-
-
-class ExpandedJob(BaseModel):
-    """A concrete job instance expanded from a periodic task or charging job."""
-
-    job_id: str
-    source_task_id: str
-    release: int
-    deadline: int
-    execution: int
-    demand: int
-    preemptive: bool
-    is_charging: bool = False
-    target_storage: Optional[str] = None
+from src.model import (
+    ExpandedJob,
+    Generator,
+    ProcessorSettingsSystem,
+    PriceSystem,
+    Storage,
+)
 
 
-class Scheduler:
-    """PuLP-based MILP day-ahead static scheduler for periodic jobs.
+class VppMilpFormulator:
+    """Formulates the mixed-integer linear programming (MILP) model.
 
-    Reads task set, processor settings, and market prices, formulates
-    a mixed-integer linear program, solves it, and outputs schedule results.
+    This class handles variable creation, objective setup, and constraint declaration
+    for the real-time Virtual Power Plant (VPP) system over a planning horizon.
     """
 
-    _HORIZON: int = 72
     _DELTA_T: int = 1
-    _EPS: float = 1e-6
 
     def __init__(
         self,
-        processor_settings_path: str = "input/processor_settings.json",
-        task_set_path: str = "output/task_set.json",
-        price_path: str = "input/price_72hr.json",
-        output_path: str = "output/schedule_result.json",
+        assets: ProcessorSettingsSystem,
+        prices: PriceSystem,
+        all_jobs: list[ExpandedJob],
+        horizon: int = 72,
     ) -> None:
-        self._processor_settings_path = processor_settings_path
-        self._task_set_path = task_set_path
-        self._price_path = price_path
-        self._output_path = output_path
+        """Initializes the formulator with assets, prices, and jobs.
 
-    def run(self) -> dict[str, Any]:
-        """Executes the full scheduling pipeline.
-
-        Returns:
-            Dict with 'schedule_result' list and 'reserve' dict.
+        Args:
+            assets: The physical device settings (generators, storages, renewables).
+            prices: The day-ahead hourly price list.
+            all_jobs: The combined list of expanded regular and charging jobs.
+            horizon: The scheduling horizon duration (in ticks).
         """
-        self._load_data()
-        self._expand_jobs()
-        self._build_index_maps()
-        self._create_model()
-        self._create_variables()
-        self._add_objective()
-        self._add_constraints()
-        self._solve()
-        result = self._extract_results()
-        reserve = self._compute_reserve()
-        return {"schedule_result": result, "reserve": reserve}
+        self._assets = assets
+        self._prices = prices
+        self._all_jobs = all_jobs
+        self._horizon = horizon
 
-    # ------------------------------------------------------------------ data
-    def _load_data(self) -> None:
-        self._assets = ProcessorSettingsSystem.load_from_json(
-            self._processor_settings_path
-        )
-        self._tasks = TaskSystem.load_from_json(self._task_set_path)
-        self._prices = PriceSystem.load_from_json(self._price_path)
+        self._regular_jobs = [j for j in all_jobs if not j.is_charging]
+        self._charging_jobs = [j for j in all_jobs if j.is_charging]
 
-        self._price_map: dict[int, int] = {
-            p.hour: p.market_price for p in self._prices.price
-        }
+        self._time_steps = list(range(1, horizon + 1))
+        self._prob = pulp.LpProblem("VPP_DayAhead", pulp.LpMinimize)
+
+        # Build maps for formulation lookup
+        self._price_map = {p.hour: p.market_price for p in self._prices.price}
         self._forecast_map: dict[str, dict[int, float]] = {}
         for rf in self._assets.renewable_forecasts:
             self._forecast_map[rf.renewable_id] = {
                 f.hour: f.pv_forecast for f in rf.forecasts
             }
-        self._capacity_map: dict[str, int] = {
+        self._capacity_map = {
             rc.renewable_id: rc.capacity
             for rc in self._assets.renewable_capacities
         }
-        self._charging_target: dict[str, str] = {
-            cj.job_id: cj.target_storage
-            for cj in self._assets.charging_jobs
-        }
-        self._gen_map: dict[str, Generator] = {
+        self._gen_map = {
             g.generator_id: g for g in self._assets.generators
         }
-        self._sto_map: dict[str, Storage] = {
+        self._sto_map = {
             s.storage_id: s for s in self._assets.storages
         }
 
-    # -------------------------------------------------------------- expansion
-    def _expand_jobs(self) -> None:
-        self._regular_jobs: list[ExpandedJob] = []
-        self._charging_jobs_list: list[ExpandedJob] = []
-
-        for task in self._tasks.periodic_tasks:
-            k = 0
-            while True:
-                abs_release = task.r + k * task.p
-                abs_deadline = abs_release + task.d - 1
-                if abs_release > self._HORIZON or abs_deadline > self._HORIZON:
-                    break
-                self._regular_jobs.append(
-                    ExpandedJob(
-                        job_id=f"{task.task_id}_{k}",
-                        source_task_id=task.task_id,
-                        release=abs_release,
-                        deadline=abs_deadline,
-                        execution=task.e,
-                        demand=task.w,
-                        preemptive=task.preempt == 1,
-                    )
-                )
-                k += 1
-
-        for cj in self._assets.charging_jobs:
-            self._charging_jobs_list.append(
-                ExpandedJob(
-                    job_id=cj.job_id,
-                    source_task_id=cj.job_id,
-                    release=1,
-                    deadline=self._HORIZON,
-                    execution=self._HORIZON,
-                    demand=0,
-                    preemptive=True,
-                    is_charging=True,
-                    target_storage=cj.target_storage,
-                )
-            )
-
-        self._all_jobs = self._regular_jobs + self._charging_jobs_list
-
-    # --------------------------------------------------------------- indices
-    def _build_index_maps(self) -> None:
-        self._time_steps = list(range(1, self._HORIZON + 1))
         self._gen_ids = [g.generator_id for g in self._assets.generators]
         self._ren_ids = [
             rc.renewable_id for rc in self._assets.renewable_capacities
@@ -152,37 +71,98 @@ class Scheduler:
         self._all_device_ids = self._gen_ids + self._ren_ids + self._sto_ids
         self._gen_ren_ids = self._gen_ids + self._ren_ids
 
-        self._job_map: dict[str, ExpandedJob] = {
-            j.job_id: j for j in self._all_jobs
+        self._storage_charging_job = {
+            cj.target_storage: cj.job_id for cj in self._charging_jobs
         }
-        self._regular_job_ids = [j.job_id for j in self._regular_jobs]
-        self._charging_job_ids = [j.job_id for j in self._charging_jobs_list]
 
-        self._big_m = float(
-            sum(g.output_max for g in self._assets.generators)
-            + sum(rc.capacity for rc in self._assets.renewable_capacities)
-            + sum(s.discharge_max for s in self._assets.storages)
-        )
+        # Decision variables dict placeholders
+        self._P: dict[str, dict[int, pulp.LpVariable]] = {}
+        self._k: dict[str, dict[str, dict[int, pulp.LpVariable]]] = {}
+        self._u: dict[str, dict[int, pulp.LpVariable]] = {}
+        self._start: dict[str, dict[int, pulp.LpVariable]] = {}
+        self._stop: dict[str, dict[int, pulp.LpVariable]] = {}
+        self._charge_b: dict[str, dict[int, pulp.LpVariable]] = {}
+        self._discharge_b: dict[str, dict[int, pulp.LpVariable]] = {}
+        self._SOC: dict[str, dict[int, pulp.LpVariable]] = {}
+        self._Sell: dict[int, pulp.LpVariable] = {}
+        self._x: dict[str, dict[int, pulp.LpVariable]] = {}
 
-        self._storage_charging_job: dict[str, str] = {}
-        for cj in self._charging_jobs_list:
-            self._storage_charging_job[cj.target_storage] = cj.job_id
+    @property
+    def prob(self) -> pulp.LpProblem:
+        """Returns the formulated PuLP LpProblem."""
+        return self._prob
 
-    # ----------------------------------------------------------------- model
-    def _create_model(self) -> None:
-        self._prob = pulp.LpProblem("VPP_DayAhead", pulp.LpMinimize)
+    @property
+    def P(self) -> dict[str, dict[int, pulp.LpVariable]]:
+        """Returns the output power variables P[device_id][tick]."""
+        return self._P
 
-    # --------------------------------------------------------------- variables
+    @property
+    def k(self) -> dict[str, dict[str, dict[int, pulp.LpVariable]]]:
+        """Returns the routing variables k[job_id][device_id][tick]."""
+        return self._k
+
+    @property
+    def SOC(self) -> dict[str, dict[int, pulp.LpVariable]]:
+        """Returns the storage State of Charge variables SOC[storage_id][tick]."""
+        return self._SOC
+
+    @property
+    def Sell(self) -> dict[int, pulp.LpVariable]:
+        """Returns the market sales variables Sell[tick]."""
+        return self._Sell
+
+    @property
+    def time_steps(self) -> list[int]:
+        """Returns the horizon time steps list."""
+        return self._time_steps
+
+    @property
+    def all_device_ids(self) -> list[str]:
+        """Returns all device IDs (generators, renewables, storage)."""
+        return self._all_device_ids
+
+    @property
+    def gen_ren_ids(self) -> list[str]:
+        """Returns generator and renewable IDs."""
+        return self._gen_ren_ids
+
+    @property
+    def sto_ids(self) -> list[str]:
+        """Returns storage device IDs."""
+        return self._sto_ids
+
+    @property
+    def all_jobs(self) -> list[ExpandedJob]:
+        """Returns all expanded jobs list."""
+        return self._all_jobs
+
+    @property
+    def regular_jobs(self) -> list[ExpandedJob]:
+        """Returns only expanded regular jobs list."""
+        return self._regular_jobs
+
+    def formulate(self) -> None:
+        """Formulates the variables, objective, and all 23 constraints."""
+        self._create_variables()
+        self._add_objective()
+        self._add_job_constraints()
+        self._add_generator_constraints()
+        self._add_renewable_constraints()
+        self._add_storage_constraints()
+        self._add_power_balance_constraints()
+
     def _create_variables(self) -> None:
+        """Declares all decision variables for the MILP solver."""
         T = self._time_steps
 
-        self._P: dict[str, dict[int, pulp.LpVariable]] = {}
+        # P[i][t]: Device output
         for i in self._all_device_ids:
             self._P[i] = {
                 t: pulp.LpVariable(f"P_{i}_{t}", lowBound=0) for t in T
             }
 
-        self._k: dict[str, dict[str, dict[int, pulp.LpVariable]]] = {}
+        # k[job][device][t]: Energy routing
         for job in self._all_jobs:
             self._k[job.job_id] = {}
             allowed_devices = (
@@ -195,9 +175,7 @@ class Scheduler:
                         f"k_{job.job_id}_{i}_{t}", lowBound=0
                     )
 
-        self._u: dict[str, dict[int, pulp.LpVariable]] = {}
-        self._start: dict[str, dict[int, pulp.LpVariable]] = {}
-        self._stop: dict[str, dict[int, pulp.LpVariable]] = {}
+        # Generator on/off/start/stop binaries
         for i in self._gen_ids:
             self._u[i] = {
                 t: pulp.LpVariable(f"u_{i}_{t}", cat="Binary") for t in T
@@ -209,9 +187,7 @@ class Scheduler:
                 t: pulp.LpVariable(f"stop_{i}_{t}", cat="Binary") for t in T
             }
 
-        self._charge_b: dict[str, dict[int, pulp.LpVariable]] = {}
-        self._discharge_b: dict[str, dict[int, pulp.LpVariable]] = {}
-        self._SOC: dict[str, dict[int, pulp.LpVariable]] = {}
+        # Storage charge/discharge binaries & SOC continuous variables
         for i in self._sto_ids:
             sto = self._sto_map[i]
             self._charge_b[i] = {
@@ -227,19 +203,18 @@ class Scheduler:
                 for t in T
             }
 
-        self._Sell: dict[int, pulp.LpVariable] = {
-            t: pulp.LpVariable(f"Sell_{t}", lowBound=0) for t in T
-        }
+        # Sell[t]: Grid sales power
+        self._Sell = {t: pulp.LpVariable(f"Sell_{t}", lowBound=0) for t in T}
 
-        self._x: dict[str, dict[int, pulp.LpVariable]] = {}
+        # x[job][t]: Job active state binaries (for regular jobs only)
         for job in self._regular_jobs:
             self._x[job.job_id] = {
                 t: pulp.LpVariable(f"x_{job.job_id}_{t}", cat="Binary")
                 for t in range(job.release, job.deadline + 1)
             }
 
-    # ------------------------------------------------------------- objective
     def _add_objective(self) -> None:
+        """Defines the objective function (minimize gen cost - maximize sell revenue)."""
         f2 = pulp.lpSum(
             self._gen_map[i].cost_fixed * self._u[i][t]
             + self._gen_map[i].cost_variable * self._P[i][t]
@@ -251,15 +226,8 @@ class Scheduler:
         )
         self._prob += f2 + f3, "objective"
 
-    # ----------------------------------------------------------- constraints
-    def _add_constraints(self) -> None:
-        self._add_job_constraints()
-        self._add_generator_constraints()
-        self._add_renewable_constraints()
-        self._add_storage_constraints()
-        self._add_power_balance_constraints()
-
     def _add_job_constraints(self) -> None:
+        """Declares task execution, demand, and preemption constraints."""
         for job in self._regular_jobs:
             jid = job.job_id
             window = range(job.release, job.deadline + 1)
@@ -314,6 +282,7 @@ class Scheduler:
                     )
 
     def _add_generator_constraints(self) -> None:
+        """Declares output limits, ramp rates, and min up/down time constraints."""
         for i in self._gen_ids:
             gen = self._gen_map[i]
             u_initial = 1 if gen.initial_on_time > 0 else 0
@@ -342,7 +311,7 @@ class Scheduler:
                     f"C7_dn_{i}_{t}",
                 )
 
-                # Start/stop linking
+                # Start/stop binaries linking
                 u_prev = self._u[i][t - 1] if t > 1 else u_initial
                 self._prob += (
                     self._start[i][t] - self._stop[i][t]
@@ -357,7 +326,7 @@ class Scheduler:
             # C9: min up time
             ut = gen.min_up_time
             for t in self._time_steps:
-                end = min(t + ut - 1, self._HORIZON)
+                end = min(t + ut - 1, self._horizon)
                 self._prob += (
                     pulp.lpSum(
                         self._u[i][s] for s in range(t, end + 1)
@@ -369,7 +338,7 @@ class Scheduler:
             # C10: min down time
             dt = gen.min_down_time
             for t in self._time_steps:
-                end = min(t + dt - 1, self._HORIZON)
+                end = min(t + dt - 1, self._horizon)
                 self._prob += (
                     pulp.lpSum(
                         1 - self._u[i][s] for s in range(t, end + 1)
@@ -381,7 +350,7 @@ class Scheduler:
             # C11: initial up time carry-over
             if gen.initial_on_time > 0:
                 remaining_up = max(0, gen.min_up_time - gen.initial_on_time)
-                for t in range(1, min(remaining_up, self._HORIZON) + 1):
+                for t in range(1, min(remaining_up, self._horizon) + 1):
                     self._prob += (
                         self._u[i][t] == 1,
                         f"C11_initup_{i}_{t}",
@@ -390,13 +359,14 @@ class Scheduler:
             # C12: initial down time carry-over
             if gen.initial_off_time > 0:
                 remaining_dn = max(0, gen.min_down_time - gen.initial_off_time)
-                for t in range(1, min(remaining_dn, self._HORIZON) + 1):
+                for t in range(1, min(remaining_dn, self._horizon) + 1):
                     self._prob += (
                         self._u[i][t] == 0,
                         f"C12_initdn_{i}_{t}",
                     )
 
     def _add_renewable_constraints(self) -> None:
+        """Declares renewable capacity upper bounds based on hourly solar forecasts."""
         for i in self._ren_ids:
             cap = self._capacity_map[i]
             forecasts = self._forecast_map[i]
@@ -408,6 +378,7 @@ class Scheduler:
                 )
 
     def _add_storage_constraints(self) -> None:
+        """Declares storage battery discharge, charge limits, and SOC balance constraints."""
         for i in self._sto_ids:
             sto = self._sto_map[i]
             chg_jid = self._storage_charging_job[i]
@@ -457,6 +428,7 @@ class Scheduler:
                 )
 
     def _add_power_balance_constraints(self) -> None:
+        """Declares grid-level power balance and device routing limitations."""
         for t in self._time_steps:
             total_supply = pulp.lpSum(
                 self._P[i][t] for i in self._all_device_ids
@@ -489,94 +461,3 @@ class Scheduler:
                     alloc <= self._P[i][t],
                     f"C20_devalloc_{i}_{t}",
                 )
-
-    # ----------------------------------------------------------------- solve
-    def _solve(self) -> None:
-        self._prob.solve(pulp.PULP_CBC_CMD(msg=1))
-        status = pulp.LpStatus[self._prob.status]
-        if status != "Optimal":
-            raise RuntimeError(f"Solver did not find optimal solution: {status}")
-        print(f"Objective value: {pulp.value(self._prob.objective):.2f}")
-
-    # -------------------------------------------------------------- results
-    def _clean(self, val: float) -> float:
-        return 0.0 if abs(val) < self._EPS else round(val, 4)
-
-    def _extract_results(self) -> list[dict[str, Any]]:
-        results: list[dict[str, Any]] = []
-
-        for t in self._time_steps:
-            p_dict: dict[str, float] = {}
-            for i in self._all_device_ids:
-                v = self._clean(pulp.value(self._P[i][t]))
-                if v > 0:
-                    p_dict[i] = v
-
-            k_dict: dict[str, dict[str, float]] = {}
-            for job in self._all_jobs:
-                allowed = (
-                    self._gen_ren_ids
-                    if job.is_charging
-                    else self._all_device_ids
-                )
-                job_alloc: dict[str, float] = {}
-                for i in allowed:
-                    if t in self._k[job.job_id].get(i, {}):
-                        v = self._clean(
-                            pulp.value(self._k[job.job_id][i][t])
-                        )
-                        if v > 0:
-                            job_alloc[i] = v
-                if job_alloc:
-                    k_dict[job.job_id] = job_alloc
-
-            soc_dict: dict[str, float] = {}
-            for i in self._sto_ids:
-                soc_dict[i] = self._clean(pulp.value(self._SOC[i][t]))
-
-            sell_val = self._clean(pulp.value(self._Sell[t]))
-
-            results.append(
-                {
-                    "t": t,
-                    "P": p_dict,
-                    "k": k_dict,
-                    "sell": sell_val,
-                    "soc": soc_dict,
-                    "missed_aperiodic": [],
-                    "rejected_sporadic": [],
-                }
-            )
-
-        return results
-
-    def _compute_reserve(self) -> dict[int, float]:
-        reserve: dict[int, float] = {}
-        for t in self._time_steps:
-            total_supply = sum(
-                self._clean(pulp.value(self._P[i][t]))
-                for i in self._all_device_ids
-            )
-            total_demand = sum(
-                self._clean(pulp.value(self._k[job.job_id][i][t]))
-                for job in self._regular_jobs
-                for i in self._all_device_ids
-                if t in self._k[job.job_id].get(i, {})
-            )
-            reserve[t] = self._clean(total_supply - total_demand)
-        return reserve
-
-
-def main() -> None:
-    """Runs the MILP scheduler and outputs schedule_result.json."""
-    scheduler = Scheduler()
-    output = scheduler.run()
-    JsonIO.save(
-        {"schedule_result": output["schedule_result"]}, "output/schedule_result.json"
-    )
-    print(f"Schedule saved to output/schedule_result.json")
-    print(f"Time steps: {len(output['schedule_result'])}")
-
-
-if __name__ == "__main__":
-    main()
