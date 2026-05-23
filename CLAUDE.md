@@ -1,5 +1,39 @@
 # CLAUDE.md
 
+## Project Overview
+
+VPP-RTS is a Virtual Power Plant real-time scheduling system for an NCKU homework. The pipeline runs in phases orchestrated by `src/main.py`:
+
+1. **Phase 1 — Task Generation** (`src/generator/`): randomly generates 6–10 periodic tasks satisfying frame-size, density, and job-count constraints. Output: `output/task_set.json`.
+2. **Phase 2 — Day-Ahead Scheduling** (`src/scheduler.py`): PuLP MILP solver that expands periodic tasks into concrete job instances over a 72-hour horizon, optimizes generator cost and market revenue subject to 23 constraints (energy demand, ramp rates, SOC, power balance, etc.). Output: `output/schedule_result.json`.
+3. **Phase 3 — Acceptance Test & Evaluation** (not yet implemented): sporadic job acceptance, aperiodic scheduling, and metrics computation.
+
+## Architecture
+
+```
+src/
+├── main.py                  # Pipeline entry: generate_task_set() -> run_scheduler()
+├── generator/               # Phase 1: task set generation
+│   ├── task_set_generator.py
+│   ├── frame_size_calculator.py
+│   └── task_set_validator.py
+├── scheduler.py             # Phase 2: MILP scheduler (Scheduler class)
+├── model/                   # Pydantic data models (loaded via AppBaseModel.load_from_json)
+│   ├── base/base_model.py   # Base class with _parse template method
+│   ├── asset/               # ProcessorSettingsSystem, Generator, Storage, Renewable, ChargingJob
+│   ├── task/                # TaskSystem, PeriodicTask, SporadicTask, AperiodicTask
+│   └── market/              # PriceSystem, PriceRecord
+└── utils/file_io.py         # JsonIO static utility
+```
+
+## Key Domain Concepts
+
+- **Devices** (`I`): generators (`Ig`), renewables (`Ir`), storages (`Ib`) — all defined in `input/processor_settings.json`
+- **Jobs**: periodic tasks expand into concrete jobs with `release = r + k*p`, `deadline = release + d - 1`; only jobs with `deadline <= 72` are included
+- **Charging jobs**: special jobs that route energy from generators/renewables into storage SOC; they cannot be supplied by storage discharge
+- **Decision variables**: `P[i][t]` (device output), `k[j][i][t]` (energy routing), `u/start/stop` (generator on/off), `charge_b/discharge_b/SOC` (storage state), `Sell[t]`, `x[j][t]` (job active binary)
+- **Objective**: minimize generator cost − maximize sell revenue (no aperiodic penalty in Phase 2)
+
 ## Code Style
 
 Follow the [Google Python Style Guide](https://google.github.io/styleguide/pyguide.html).
