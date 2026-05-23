@@ -13,7 +13,8 @@ class VppConfig(BaseModel):
     task_set_filename: str = "task_set.json"
     price_filename: str = "price_72hr.json"
     schedule_result_filename: str = "schedule_result.json"
-    
+    evaluation_results_filename: str = "evaluation_results.json"
+
     # Magic Numbers
     horizon: int = 72
     epsilon: float = 1e-6
@@ -33,6 +34,10 @@ class VppConfig(BaseModel):
     @property
     def schedule_result_path(self) -> str:
         return os.path.join(self.output_dir, self.schedule_result_filename)
+
+    @property
+    def evaluation_results_path(self) -> str:
+        return os.path.join(self.output_dir, self.evaluation_results_filename)
 
 # Global default instance
 config = VppConfig()
