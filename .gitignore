@@ -220,6 +220,9 @@ __marimo__/
 # JetBrains IDEs
 .idea/
 
+# Claude AI
+.claude/
+
 # VS Code
 .vscode/
 
