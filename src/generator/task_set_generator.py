@@ -11,10 +11,10 @@ from src.generator.task_set_validator import TaskSetValidator
 class TaskSetGenerator:
     """Generates sets of periodic tasks satisfying specific constraints."""
 
-    def __init__(self, validator: Optional[TaskSetValidator] = None) -> None:
+    def __init__(self, horizon: int, validator: Optional[TaskSetValidator] = None) -> None:
         """Initializes the TaskSetGenerator with a calculator and validator."""
-        self._calculator = FrameSizeCalculator()
-        self._validator = validator or TaskSetValidator()
+        self._calculator = FrameSizeCalculator(horizon=horizon)
+        self._validator = validator or TaskSetValidator(horizon=horizon)
 
     def generate(self) -> Tuple[Dict[str, dict], int]:
         """Generates a valid dictionary of tasks and the corresponding frame size.

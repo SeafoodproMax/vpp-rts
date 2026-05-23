@@ -13,7 +13,7 @@ class SchedulerResultExtractor:
     """
 
     def __init__(
-        self, formulator: VppMilpFormulator, eps: float = 1e-6
+        self, formulator: VppMilpFormulator, eps: float
     ) -> None:
         """Initializes the result extractor.
 

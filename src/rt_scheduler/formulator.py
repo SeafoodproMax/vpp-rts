@@ -24,7 +24,7 @@ class VppMilpFormulator:
         assets: ProcessorSettingsSystem,
         prices: PriceSystem,
         all_jobs: list[ExpandedJob],
-        horizon: int = 72,
+        horizon: int,
     ) -> None:
         """Initializes the formulator with assets, prices, and jobs.
 

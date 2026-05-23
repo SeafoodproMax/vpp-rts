@@ -18,13 +18,14 @@ class RTScheduler:
 
     def __init__(
         self,
-        processor_settings_path: str = "input/processor_settings.json",
-        task_set_path: str = "output/task_set.json",
-        price_path: str = "input/price_72hr.json",
+        processor_settings_path: str,
+        task_set_path: str,
+        price_path: str,
+        horizon: int,
+        epsilon: float,
         assets: ProcessorSettingsSystem | None = None,
         tasks: TaskSystem | None = None,
         prices: PriceSystem | None = None,
-        horizon: int = 72,
     ) -> None:
         """Initializes the scheduler with paths or pre-loaded dependency models.
 
@@ -32,15 +33,17 @@ class RTScheduler:
             processor_settings_path: File path to the processor settings JSON.
             task_set_path: File path to the task set JSON.
             price_path: File path to the pricing forecast JSON.
+            horizon: The planning horizon duration (in ticks).
+            epsilon: Epsilon threshold for result extractor.
             assets: Optional pre-loaded ProcessorSettingsSystem aggregate (DI).
             tasks: Optional pre-loaded TaskSystem aggregate (DI).
             prices: Optional pre-loaded PriceSystem aggregate (DI).
-            horizon: The planning horizon duration (in ticks).
         """
         self._processor_settings_path = processor_settings_path
         self._task_set_path = task_set_path
         self._price_path = price_path
         self._horizon = horizon
+        self._epsilon = epsilon
 
         # Dependency Injection support
         self._assets = assets
@@ -94,7 +97,7 @@ class RTScheduler:
         print(f"Objective value: {pulp.value(formulator.prob.objective):.2f}")
 
         # 5. Extract and format results
-        extractor = SchedulerResultExtractor(formulator=formulator)
+        extractor = SchedulerResultExtractor(formulator=formulator, eps=self._epsilon)
         result = extractor.extract_results()
         reserve = extractor.compute_reserve()
 

@@ -22,6 +22,8 @@ def test_rt_scheduler_integration_run() -> None:
             processor_settings_path=processor_settings_path,
             task_set_path=task_set_path,
             price_path=price_path,
+            horizon=72,
+            epsilon=1e-6,
         )
 
         results = scheduler.run()

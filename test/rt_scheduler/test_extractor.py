@@ -78,7 +78,7 @@ def test_clean_rounding() -> None:
 def test_compute_reserve() -> None:
     """Tests that capacity reserves are computed correctly."""
     fake_formulator = FakeFormulator()
-    extractor = SchedulerResultExtractor(formulator=fake_formulator)  # type: ignore
+    extractor = SchedulerResultExtractor(formulator=fake_formulator, eps=1e-6)  # type: ignore
 
     reserves = extractor.compute_reserve()
 

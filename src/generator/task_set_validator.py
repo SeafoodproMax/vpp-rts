@@ -6,6 +6,14 @@ from typing import Dict, Optional
 class TaskSetValidator:
     """Validates the generated task sets against required constraints."""
 
+    def __init__(self, horizon: int) -> None:
+        """Initializes the validator.
+        
+        Args:
+            horizon: The planning horizon duration.
+        """
+        self._horizon = horizon
+
     def is_valid(self, tasks_dict: Dict[str, dict], frame_size: Optional[int]) -> bool:
         """Validates all constraints for a given task set and frame size.
 
@@ -32,14 +40,14 @@ class TaskSetValidator:
         return density >= 0.7
 
     def _validate_jobs_count(self, tasks_dict: Dict[str, dict]) -> bool:
-        """Validates that the total job count within 72 units exceeds 30."""
+        """Validates that the total job count within the horizon exceeds 30."""
         jobs_count = 0
         for t in tasks_dict.values():
             r = t["r"]
             p = t["p"]
             d = t["d"]
             k = 0
-            while r + k * p + d <= 72:
+            while r + k * p + d <= self._horizon:
                 jobs_count += 1
                 k += 1
         return jobs_count > 30

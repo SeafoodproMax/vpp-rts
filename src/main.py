@@ -3,9 +3,10 @@ import os
 from src.generator import TaskSetGenerator
 from src.rt_scheduler import RTScheduler
 from src.utils import JsonIO
+from src.config import config
 
-_TASK_SET_PATH = os.path.join("output", "task_set.json")
-_SCHEDULE_PATH = os.path.join("output", "schedule_result.json")
+_TASK_SET_PATH = config.task_set_path
+_SCHEDULE_PATH = config.schedule_result_path
 
 
 def generate_task_set() -> str:
@@ -14,7 +15,7 @@ def generate_task_set() -> str:
     Returns:
         Path to the saved task set file.
     """
-    generator = TaskSetGenerator()
+    generator = TaskSetGenerator(horizon=config.horizon)
     tasks_dict, frame_size = generator.generate()
     output_data = {
         "frame_size": frame_size,
@@ -36,7 +37,13 @@ def run_scheduler(task_set_path: str = _TASK_SET_PATH) -> dict:
     Returns:
         Scheduler output containing schedule_result and reserve.
     """
-    scheduler = RTScheduler(task_set_path=task_set_path)
+    scheduler = RTScheduler(
+        processor_settings_path=config.processor_settings_path,
+        task_set_path=task_set_path,
+        price_path=config.price_path,
+        horizon=config.horizon,
+        epsilon=config.epsilon,
+    )
     result = scheduler.run()
 
     JsonIO.save({"schedule_result": result["schedule_result"]}, _SCHEDULE_PATH)

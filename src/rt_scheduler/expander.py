@@ -9,7 +9,7 @@ class JobExpander:
     This class isolates the temporal expansion logic over a planning horizon.
     """
 
-    def __init__(self, horizon: int = 72) -> None:
+    def __init__(self, horizon: int) -> None:
         """Initializes the job expander.
 
         Args:
