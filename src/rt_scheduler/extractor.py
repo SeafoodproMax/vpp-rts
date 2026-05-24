@@ -57,6 +57,13 @@ class SchedulerResultExtractor:
         SOC = self._formulator.SOC
         Sell = self._formulator.Sell
 
+        # Aperiodic jobs flagged Miss=1 missed their soft deadline.
+        missed_aperiodic = sorted(
+            jid
+            for jid, var in self._formulator.Miss.items()
+            if pulp.value(var) is not None and round(pulp.value(var)) == 1
+        )
+
         for t in time_steps:
             p_dict: dict[str, float] = {}
             for i in all_device_ids:
@@ -89,7 +96,7 @@ class SchedulerResultExtractor:
                     "k": k_dict,
                     "sell": sell_val,
                     "soc": soc_dict,
-                    "missed_aperiodic": [],
+                    "missed_aperiodic": list(missed_aperiodic),
                     "rejected_sporadic": [],
                 }
             )

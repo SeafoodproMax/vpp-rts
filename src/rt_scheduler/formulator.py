@@ -18,6 +18,7 @@ class VppMilpFormulator:
     """
 
     _DELTA_T: int = 1
+    _ALPHA: int = 10000  # penalty ($/miss) per missed aperiodic job (objective f1)
 
     def __init__(
         self,
@@ -39,8 +40,15 @@ class VppMilpFormulator:
         self._all_jobs = all_jobs
         self._horizon = horizon
 
+        # Non-charging jobs share x variables and the C1 demand link. Hard jobs
+        # (periodic / sporadic) must finish by their deadline (C3); aperiodic
+        # jobs are soft and instead carry a Miss binary governed by C4.
         self._regular_jobs = [j for j in all_jobs if not j.is_charging]
         self._charging_jobs = [j for j in all_jobs if j.is_charging]
+        self._aperiodic_jobs = [j for j in all_jobs if j.is_aperiodic]
+        self._hard_jobs = [
+            j for j in all_jobs if not j.is_charging and not j.is_aperiodic
+        ]
 
         self._time_steps = list(range(1, horizon + 1))
         self._prob = pulp.LpProblem("VPP_DayAhead", pulp.LpMinimize)
@@ -86,6 +94,7 @@ class VppMilpFormulator:
         self._SOC: dict[str, dict[int, pulp.LpVariable]] = {}
         self._Sell: dict[int, pulp.LpVariable] = {}
         self._x: dict[str, dict[int, pulp.LpVariable]] = {}
+        self._Miss: dict[str, pulp.LpVariable] = {}
 
     @property
     def prob(self) -> pulp.LpProblem:
@@ -142,6 +151,24 @@ class VppMilpFormulator:
         """Returns only expanded regular jobs list."""
         return self._regular_jobs
 
+    @property
+    def aperiodic_jobs(self) -> list[ExpandedJob]:
+        """Returns the expanded aperiodic (soft-deadline) jobs list."""
+        return self._aperiodic_jobs
+
+    @property
+    def Miss(self) -> dict[str, pulp.LpVariable]:
+        """Returns the aperiodic miss binaries Miss[job_id]."""
+        return self._Miss
+
+    def _job_end(self, job: ExpandedJob) -> int:
+        """Returns the last tick a job may execute on.
+
+        Aperiodic jobs are soft and may run past their deadline up to the
+        horizon end; every other job must finish by its deadline.
+        """
+        return self._horizon if job.is_aperiodic else job.deadline
+
     def formulate(self) -> None:
         """Formulates the variables, objective, and all 23 constraints."""
         self._create_variables()
@@ -170,7 +197,7 @@ class VppMilpFormulator:
             )
             for i in allowed_devices:
                 self._k[job.job_id][i] = {}
-                for t in range(job.release, job.deadline + 1):
+                for t in range(job.release, self._job_end(job) + 1):
                     self._k[job.job_id][i][t] = pulp.LpVariable(
                         f"k_{job.job_id}_{i}_{t}", lowBound=0
                     )
@@ -206,15 +233,26 @@ class VppMilpFormulator:
         # Sell[t]: Grid sales power
         self._Sell = {t: pulp.LpVariable(f"Sell_{t}", lowBound=0) for t in T}
 
-        # x[job][t]: Job active state binaries (for regular jobs only)
+        # Miss[job]: aperiodic soft-deadline miss binaries.
+        for job in self._aperiodic_jobs:
+            self._Miss[job.job_id] = pulp.LpVariable(
+                f"Miss_{job.job_id}", cat="Binary"
+            )
+
+        # x[job][t]: Job active state binaries (for non-charging jobs).
         for job in self._regular_jobs:
             self._x[job.job_id] = {
                 t: pulp.LpVariable(f"x_{job.job_id}_{t}", cat="Binary")
-                for t in range(job.release, job.deadline + 1)
+                for t in range(job.release, self._job_end(job) + 1)
             }
 
     def _add_objective(self) -> None:
-        """Defines the objective function (minimize gen cost - maximize sell revenue)."""
+        """Defines the objective F = alpha*f1 + f2 + f3.
+
+        f1 penalises missed aperiodic jobs, f2 is generator cost, f3 is the
+        negated market revenue (minimising f3 maximises sales income).
+        """
+        f1 = self._ALPHA * pulp.lpSum(self._Miss.values())
         f2 = pulp.lpSum(
             self._gen_map[i].cost_fixed * self._u[i][t]
             + self._gen_map[i].cost_variable * self._P[i][t]
@@ -224,13 +262,14 @@ class VppMilpFormulator:
         f3 = -pulp.lpSum(
             self._price_map[t] * self._Sell[t] for t in self._time_steps
         )
-        self._prob += f2 + f3, "objective"
+        self._prob += f1 + f2 + f3, "objective"
 
     def _add_job_constraints(self) -> None:
-        """Declares task execution, demand, and preemption constraints."""
+        """Declares task execution, demand, deadline, and preemption constraints."""
         for job in self._regular_jobs:
             jid = job.job_id
-            window = range(job.release, job.deadline + 1)
+            # Aperiodic jobs may run up to the horizon; hard jobs stop at deadline.
+            window = range(job.release, self._job_end(job) + 1)
 
             for t in window:
                 k_sum = pulp.lpSum(
@@ -244,11 +283,14 @@ class VppMilpFormulator:
                     f"C1_demand_{jid}_{t}",
                 )
 
-            # C3: must execute exactly e time steps
-            self._prob += (
-                pulp.lpSum(self._x[jid][t] for t in window) == job.execution,
-                f"C3_exec_{jid}",
-            )
+            if job.is_aperiodic:
+                self._add_aperiodic_miss_constraints(job)
+            else:
+                # C3: hard jobs must execute exactly e steps within the deadline.
+                self._prob += (
+                    pulp.lpSum(self._x[jid][t] for t in window) == job.execution,
+                    f"C3_exec_{jid}",
+                )
 
             # C5: non-preemptive jobs must run as a single contiguous block.
             # Treating x as 0 before release, every 0->1 transition (a "rise")
@@ -271,6 +313,41 @@ class VppMilpFormulator:
                     pulp.lpSum(rises) <= 1,
                     f"C5_contiguous_{jid}",
                 )
+
+    def _add_aperiodic_miss_constraints(self, job: ExpandedJob) -> None:
+        """Adds constraint C4: aperiodic soft-deadline miss definition.
+
+        With x[j][t] = min(1, sum_i k[j][i][t]) acting as the activity flag,
+        Miss[j] is forced to 1 exactly when fewer than e steps run inside the
+        deadline window, while the job must still complete all e steps by the
+        horizon end (soft deadlines may be missed, never abandoned).
+
+        Args:
+            job: The expanded aperiodic job.
+        """
+        jid = job.job_id
+        miss = self._Miss[jid]
+        e = job.execution
+        deadline_window = range(job.release, job.deadline + 1)
+        full_window = range(job.release, self._horizon + 1)
+
+        steps_by_deadline = pulp.lpSum(self._x[jid][t] for t in deadline_window)
+
+        # Meet the deadline unless flagged as missed.
+        self._prob += (
+            steps_by_deadline >= e * (1 - miss),
+            f"C4_meet_{jid}",
+        )
+        # If flagged missed, at most e-1 steps may land inside the deadline.
+        self._prob += (
+            steps_by_deadline <= e - 1 + e * (1 - miss),
+            f"C4_miss_{jid}",
+        )
+        # The job must finish all e steps by the horizon end regardless.
+        self._prob += (
+            pulp.lpSum(self._x[jid][t] for t in full_window) == e,
+            f"C4_complete_{jid}",
+        )
 
     def _add_generator_constraints(self) -> None:
         """Declares output limits, ramp rates, and min up/down time constraints."""

@@ -16,6 +16,7 @@ class ExpandedJob(BaseModel):
         demand: The power/resource demand when active.
         preemptive: Whether the job execution can be preempted.
         is_charging: Whether the job is a storage charging job.
+        is_aperiodic: Whether the job is an aperiodic soft-deadline job.
         target_storage: The ID of the target storage if this is a charging job.
     """
 
@@ -27,4 +28,5 @@ class ExpandedJob(BaseModel):
     demand: int
     preemptive: bool
     is_charging: bool = False
+    is_aperiodic: bool = False
     target_storage: Optional[str] = None

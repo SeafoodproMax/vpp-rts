@@ -76,8 +76,9 @@ class RTScheduler:
         # 2. Expand task rules into concrete timeline jobs
         expander = JobExpander(horizon=self._horizon)
         regular_jobs = expander.expand_periodic_tasks(self._tasks)
+        aperiodic_jobs = expander.expand_aperiodic_tasks(self._tasks)
         charging_jobs = expander.expand_charging_jobs(self._assets)
-        all_jobs = regular_jobs + charging_jobs
+        all_jobs = regular_jobs + aperiodic_jobs + charging_jobs
 
         # 3. Formulate the MILP Optimization Problem
         formulator = VppMilpFormulator(

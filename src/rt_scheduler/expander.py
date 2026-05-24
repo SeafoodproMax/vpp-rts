@@ -50,6 +50,41 @@ class JobExpander:
 
         return expanded_jobs
 
+    def expand_aperiodic_tasks(self, tasks: TaskSystem) -> list[ExpandedJob]:
+        """Expands aperiodic tasks into single concrete job instances.
+
+        Aperiodic tasks fire once at their release time and carry a soft
+        deadline. The job's execution window extends to the horizon end (the
+        formulator allows late completion), while ``deadline`` records the soft
+        deadline used to determine a miss.
+
+        Args:
+            tasks: The task system; aperiodic tasks are released once each.
+
+        Returns:
+            A list of expanded aperiodic job instances.
+        """
+        expanded_jobs: list[ExpandedJob] = []
+
+        for task in tasks.aperiodic_tasks:
+            deadline = task.r + task.d - 1
+            if task.r > self._horizon:
+                continue
+            expanded_jobs.append(
+                ExpandedJob(
+                    job_id=task.task_id,
+                    source_task_id=task.task_id,
+                    release=task.r,
+                    deadline=deadline,
+                    execution=task.e,
+                    demand=task.w,
+                    preemptive=(task.preempt == 1),
+                    is_aperiodic=True,
+                )
+            )
+
+        return expanded_jobs
+
     def expand_charging_jobs(
         self, assets: ProcessorSettingsSystem
     ) -> list[ExpandedJob]:
