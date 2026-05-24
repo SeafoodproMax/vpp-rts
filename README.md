@@ -11,6 +11,16 @@ poetry install
 poetry run main
 ```
 
+## Self-check (Level 1)
+
+Validate the generated artifacts against the Level 1 grading rubric (items 1–3). Standard-library only — no Poetry environment required:
+
+```bash
+python3 -m src.validator
+```
+
+Reads `output/task_set.json`, `output/schedule_result.json` and `input/processor_settings.json`, prints a per-item pass/fail report with a self-grade, and exits non-zero on any covered violation. Constraint C4 (aperiodic) is reported as `SKIP` until aperiodic handling lands.
+
 ## What it does
 
 Randomly generates 6–10 periodic tasks that satisfy the following constraints for a 72-unit hyperperiod:
@@ -40,6 +50,7 @@ Output is written to `output/task_set.json`.
 ```
 src/
 ├── main.py                  # Entry point
+├── validator.py             # Level 1 self-check (stdlib only)
 ├── generator/
 │   ├── task_set_generator.py    # Random task generation
 │   ├── frame_size_calculator.py # Frame size search
