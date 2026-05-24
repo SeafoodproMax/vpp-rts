@@ -113,6 +113,9 @@ class Level1Validator:
 
         self._frame_size = task_set.get("frame_size")
         self._tasks: dict[str, dict[str, Any]] = task_set.get("periodic", {})
+        self._aperiodic_tasks: dict[str, dict[str, Any]] = task_set.get(
+            "aperiodic", {}
+        )
 
         # Index schedule ticks by t for O(1) lookup.
         self._ticks: dict[int, dict[str, Any]] = {
@@ -173,6 +176,29 @@ class Level1Validator:
                     )
                 )
                 k += 1
+        return jobs
+
+    def _expand_aperiodic_jobs(self) -> list[_Job]:
+        """Expands aperiodic tasks into single-instance jobs (mirrors JobExpander).
+
+        ``deadline`` holds the soft deadline; the execution window itself runs
+        to the horizon end since aperiodic jobs may complete late.
+        """
+        jobs: list[_Job] = []
+        for tid, t in self._aperiodic_tasks.items():
+            if t["r"] > self._horizon:
+                continue
+            jobs.append(
+                _Job(
+                    job_id=tid,
+                    task_id=tid,
+                    release=t["r"],
+                    deadline=t["r"] + t["d"] - 1,
+                    execution=t["e"],
+                    demand=t["w"],
+                    preemptive=(t["preempt"] == 1),
+                )
+            )
         return jobs
 
     # --------------------------------------------------------------- helpers
@@ -331,12 +357,8 @@ class Level1Validator:
         }
         out.append(self._grouped("2-1", "base constraints C1,C2,C3,C5,C20", 5, v))
 
-        # 2-2 (2 pts): C4 aperiodic -- not implemented yet.
-        skipped = CheckResult(
-            "2-2", "aperiodic constraint C4", 2, status="SKIP"
-        )
-        skipped.violations.append("aperiodic not implemented -- cannot verify")
-        out.append(skipped)
+        # 2-2 (2 pts): C4 aperiodic miss definition.
+        out.append(self._c4_aperiodic())
 
         # 2-3 (7 pts): C6..C12 generator constraints.
         v = {
@@ -498,6 +520,53 @@ class Level1Validator:
             if active and (max(active) - min(active) + 1) != len(active):
                 bad.append(f"{job.job_id}: non-contiguous active ticks {active}")
         return bad
+
+    def _c4_aperiodic(self) -> CheckResult:
+        """C4: aperiodic miss flags are consistent and all work completes by H.
+
+        For each aperiodic job we recompute its activity over [release, H] and
+        check (a) all e steps complete by the horizon end, and (b) the schedule's
+        ``missed_aperiodic`` flag matches whether fewer than e steps landed
+        within the soft deadline. Reported as SKIP when no aperiodic jobs exist.
+        """
+        r = CheckResult("2-2", "aperiodic miss definition (C4)", 2)
+        ap_jobs = self._expand_aperiodic_jobs()
+        if not ap_jobs:
+            r.status = "SKIP"
+            r.score = 0.0
+            r.violations.append("no aperiodic jobs in task_set -- nothing to check")
+            return r
+
+        reported_missed: set[str] = set()
+        for rec in self._ticks.values():
+            reported_missed.update(rec.get("missed_aperiodic", []))
+
+        for job in ap_jobs:
+            jid = job.job_id
+            done_by_h = [
+                t
+                for t in range(job.release, self._horizon + 1)
+                if self._k_job_total(jid, t) > self._eps
+            ]
+            done_by_deadline = [t for t in done_by_h if t <= job.deadline]
+
+            # Every aperiodic job must complete all e steps by the horizon end.
+            if len(done_by_h) != job.execution:
+                r.violations.append(
+                    f"{jid}: {len(done_by_h)} steps by H != e {job.execution}"
+                )
+
+            # Miss flag must match actual completion within the soft deadline.
+            actual_miss = len(done_by_deadline) < job.execution
+            flagged = jid in reported_missed
+            if actual_miss != flagged:
+                r.violations.append(
+                    f"{jid}: {len(done_by_deadline)}/{job.execution} done by deadline"
+                    f" -> miss={actual_miss}, but missed_aperiodic flag={flagged}"
+                )
+
+        self._finalize(r)
+        return r
 
     def _c20_device_alloc(self) -> list[str]:
         """C20: per device, total routed energy never exceeds its output."""
