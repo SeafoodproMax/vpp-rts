@@ -250,36 +250,27 @@ class VppMilpFormulator:
                 f"C3_exec_{jid}",
             )
 
-            # C5: non-preemptive continuity (at most one start + one stop)
+            # C5: non-preemptive jobs must run as a single contiguous block.
+            # Treating x as 0 before release, every 0->1 transition (a "rise")
+            # marks the start of a block; bounding the rises by 1 forces a
+            # single block, given that Sum(x) == e is fixed by C3. The release
+            # tick must be counted as a potential rise -- skipping it lets a
+            # block start at release and a second block slip in later (one rise
+            # + one fall) without being detected.
             if not job.preemptive:
-                y_rise: dict[int, pulp.LpVariable] = {}
-                z_fall: dict[int, pulp.LpVariable] = {}
+                rises: list[pulp.LpVariable] = []
                 for t in window:
-                    if t == job.release:
-                        continue
-                    y_rise[t] = pulp.LpVariable(
-                        f"y_{jid}_{t}", cat="Binary"
-                    )
-                    z_fall[t] = pulp.LpVariable(
-                        f"z_{jid}_{t}", cat="Binary"
-                    )
+                    rise = pulp.LpVariable(f"rise_{jid}_{t}", cat="Binary")
+                    prev = self._x[jid][t - 1] if t > job.release else 0
                     self._prob += (
-                        y_rise[t] >= self._x[jid][t] - self._x[jid][t - 1],
+                        rise >= self._x[jid][t] - prev,
                         f"C5_rise_{jid}_{t}",
                     )
-                    self._prob += (
-                        z_fall[t] >= self._x[jid][t - 1] - self._x[jid][t],
-                        f"C5_fall_{jid}_{t}",
-                    )
-                if y_rise:
-                    self._prob += (
-                        pulp.lpSum(y_rise.values()) <= 1,
-                        f"C5_once_start_{jid}",
-                    )
-                    self._prob += (
-                        pulp.lpSum(z_fall.values()) <= 1,
-                        f"C5_once_stop_{jid}",
-                    )
+                    rises.append(rise)
+                self._prob += (
+                    pulp.lpSum(rises) <= 1,
+                    f"C5_contiguous_{jid}",
+                )
 
     def _add_generator_constraints(self) -> None:
         """Declares output limits, ramp rates, and min up/down time constraints."""
