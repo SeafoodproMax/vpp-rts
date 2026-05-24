@@ -4,6 +4,7 @@ from typing import Any
 import pulp
 
 from src.model import ProcessorSettingsSystem, PriceSystem, TaskSystem
+from src.rt_scheduler.acceptance_tester import AcceptanceTester
 from src.rt_scheduler.expander import JobExpander
 from src.rt_scheduler.formulator import VppMilpFormulator
 from src.rt_scheduler.extractor import SchedulerResultExtractor
@@ -101,4 +102,5 @@ class RTScheduler:
         result = extractor.extract_results()
         reserve = extractor.compute_reserve()
 
-        return {"schedule_result": result, "reserve": reserve}
+        acceptance_tester = AcceptanceTester(schedule_result=result, reserve=reserve)
+        return acceptance_tester.run(self._tasks)

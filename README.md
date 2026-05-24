@@ -35,6 +35,26 @@ Each task has the following fields:
 
 Output is written to `output/task_set.json`.
 
+## Scheduling and acceptance tests
+
+After task generation, `RTScheduler` runs a PuLP-based day-ahead MILP scheduler for
+the 72-hour horizon. It expands periodic tasks into concrete jobs, schedules VPP
+generation/storage/renewable output, and computes the remaining reserve per tick.
+
+Phase 3 then runs `AcceptanceTester` on that reserve:
+
+| Task type | Rule |
+|---|---|
+| Sporadic | Hard deadline. Accepted only if it can finish between `r` and `r + d - 1`; otherwise recorded in `rejected_sporadic`. |
+| Aperiodic | Soft deadline. Scheduled when enough reserve exists; otherwise recorded in `missed_aperiodic`. |
+| `preempt = 1` | May use non-contiguous slots. |
+| `preempt = 0` | Must use one contiguous execution window. |
+
+Accepted/scheduled jobs consume reserve by `w` for each of their `e` execution
+ticks. Schedule records may include `accepted_sporadic` and
+`scheduled_aperiodic` annotations in addition to the original
+`rejected_sporadic` and `missed_aperiodic` fields.
+
 ## Project structure
 
 ```
