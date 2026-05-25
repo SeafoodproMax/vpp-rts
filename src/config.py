@@ -17,7 +17,14 @@ class VppConfig(BaseModel):
     evaluation_results_filename: str = "evaluation_results.json"
     acceptance_test_log_filename: str = "acceptance_test_log.json"
     # Demo-provided sporadic / aperiodic jobs merged into the generated task set.
-    demo_jobs_filename: str = "aperiodic_n_sporadic_template.json"
+    demo_jobs_filename: str = "demo_jobs.json"
+
+    # Level 2 (advanced dynamic scheduling) artifacts.
+    runtime_config_filename: str = "runtime_config.json"
+    schedule_result_dynamic_filename: str = "schedule_result_dynamic.json"
+    evaluation_results_dynamic_filename: str = "evaluation_results_dynamic.json"
+    acceptance_test_log_dynamic_filename: str = "acceptance_test_log_dynamic.json"
+    dynamic_run_log_filename: str = "dynamic_run_log.json"
 
     # Magic Numbers
     horizon: int = 72
@@ -50,6 +57,26 @@ class VppConfig(BaseModel):
     @property
     def demo_jobs_path(self) -> str:
         return os.path.join(self.references_dir, self.demo_jobs_filename)
+
+    @property
+    def runtime_config_path(self) -> str:
+        return self.runtime_config_filename
+
+    @property
+    def schedule_result_dynamic_path(self) -> str:
+        return os.path.join(self.output_dir, self.schedule_result_dynamic_filename)
+
+    @property
+    def evaluation_results_dynamic_path(self) -> str:
+        return os.path.join(self.output_dir, self.evaluation_results_dynamic_filename)
+
+    @property
+    def acceptance_test_log_dynamic_path(self) -> str:
+        return os.path.join(self.output_dir, self.acceptance_test_log_dynamic_filename)
+
+    @property
+    def dynamic_run_log_path(self) -> str:
+        return os.path.join(self.output_dir, self.dynamic_run_log_filename)
 
 # Global default instance
 config = VppConfig()
