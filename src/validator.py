@@ -1,20 +1,33 @@
 """Self-grading validator for Level 1 of the VPP-RTS assignment.
 
-This module re-reads the produced JSON artifacts (``task_set.json`` and
-``schedule_result.json``) together with the fixed inputs and checks them against
-the Level 1 grading rubric (items 1, 2 and 3). It is intentionally written with
-the standard library only (``json`` / ``math``) so it stays independent of the
-scheduler under test and can run without the project's heavy dependencies.
+This module re-reads the produced JSON artifacts (``task_set.json``,
+``schedule_result.json`` and ``evaluation_results.json``) together with the
+fixed inputs and checks them against the Level 1 grading rubric. It is
+intentionally written with the standard library only (``json`` / ``math``) so it
+stays independent of the scheduler and evaluator under test and can run without
+the project's heavy dependencies.
 
-Constraint C4 (aperiodic miss, rubric item 2-2) is reported as SKIPPED because
-aperiodic handling is not implemented yet.
+Coverage by rubric item:
+    * Items 1, 2, 3 -- fully auto-checked (task-set design, model constraints,
+      schedule results & periodic performance).
+    * Item 4 (acceptance test) -- 4-3 sporadic value rate is recomputed from the
+      schedule and scored by the rubric thresholds; 4-1 / 4-2 are report-graded
+      and reported as SKIP.
+    * Item 5 (evaluation metrics) -- 5-1..5-5 are independently recomputed from
+      the schedule and cross-checked against ``evaluation_results.json``.
+    * Item 6 (reserve-strategy analysis) -- 6-1 / 6-2 are report-graded and
+      reported as SKIP.
+
+SKIP items (report-graded sub-items, or checks whose inputs are absent) are
+excluded from the self-grade total.
 
 Run with::
 
     python -m src.validator
     python -m src.validator --task-set output/task_set.json \\
         --schedule output/schedule_result.json \\
-        --settings input/processor_settings.json
+        --settings input/processor_settings.json \\
+        --evaluation output/evaluation_results.json
 """
 
 from __future__ import annotations
@@ -88,6 +101,27 @@ def _load_json(path: str) -> Any:
         raise SystemExit(f"[FATAL] {path} is not valid JSON: {exc}")
 
 
+def _load_json_optional(path: str) -> Any | None:
+    """Loads a JSON file if present, returning ``None`` when it is missing.
+
+    Args:
+        path: File path to read.
+
+    Returns:
+        The parsed JSON content, or ``None`` if the file does not exist.
+
+    Raises:
+        SystemExit: If the file exists but is not valid JSON.
+    """
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return None
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"[FATAL] {path} is not valid JSON: {exc}")
+
+
 class Level1Validator:
     """Validates Level 1 rubric items against the produced JSON artifacts."""
 
@@ -96,6 +130,7 @@ class Level1Validator:
         task_set: dict[str, Any],
         schedule: dict[str, Any],
         settings: dict[str, Any],
+        evaluation: dict[str, Any] | None = None,
         horizon: int = _HORIZON,
         eps: float = _EPS,
     ) -> None:
@@ -105,14 +140,20 @@ class Level1Validator:
             task_set: Parsed ``task_set.json`` content.
             schedule: Parsed ``schedule_result.json`` content.
             settings: Parsed ``processor_settings.json`` content.
+            evaluation: Parsed ``evaluation_results.json`` content, or ``None``
+                when the file is absent (item 5 checks then report as SKIP).
             horizon: Scheduling horizon length in ticks.
             eps: Floating-point comparison tolerance.
         """
         self._eps = eps
         self._horizon = horizon
+        self._evaluation = evaluation
 
         self._frame_size = task_set.get("frame_size")
         self._tasks: dict[str, dict[str, Any]] = task_set.get("periodic", {})
+        self._sporadic_tasks: dict[str, dict[str, Any]] = task_set.get(
+            "sporadic", {}
+        )
         self._aperiodic_tasks: dict[str, dict[str, Any]] = task_set.get(
             "aperiodic", {}
         )
@@ -178,6 +219,28 @@ class Level1Validator:
                 k += 1
         return jobs
 
+    def _expand_sporadic_jobs(self) -> list[_Job]:
+        """Expands sporadic tasks into single-instance jobs (mirrors JobExpander).
+
+        ``deadline`` is the absolute hard deadline ``r + d - 1``.
+        """
+        jobs: list[_Job] = []
+        for tid, t in self._sporadic_tasks.items():
+            if t["r"] > self._horizon:
+                continue
+            jobs.append(
+                _Job(
+                    job_id=tid,
+                    task_id=tid,
+                    release=t["r"],
+                    deadline=t["r"] + t["d"] - 1,
+                    execution=t["e"],
+                    demand=t["w"],
+                    preemptive=(t["preempt"] == 1),
+                )
+            )
+        return jobs
+
     def _expand_aperiodic_jobs(self) -> list[_Job]:
         """Expands aperiodic tasks into single-instance jobs (mirrors JobExpander).
 
@@ -234,6 +297,27 @@ class Level1Validator:
             return 0.0
         alloc = self._ticks.get(t, {}).get("k", {}).get(chg_job, {})
         return float(sum(alloc.values()))
+
+    def _completion_times(self) -> dict[str, int]:
+        """Returns the last tick at which each job receives energy.
+
+        A job is active at tick ``t`` when any device allocates positive energy
+        to it. Iterating ticks in ascending order means the final assignment
+        wins, giving the completion time used for deadline / response metrics.
+        """
+        completion: dict[str, int] = {}
+        for t in range(1, self._horizon + 1):
+            for job_id, alloc in self._ticks.get(t, {}).get("k", {}).items():
+                if any(float(v) > self._eps for v in alloc.values()):
+                    completion[job_id] = t
+        return completion
+
+    def _collect_field(self, field_name: str) -> set[str]:
+        """Returns the union of a per-tick list field across all schedule ticks."""
+        collected: set[str] = set()
+        for rec in self._ticks.values():
+            collected.update(rec.get(field_name, []))
+        return collected
 
     # ------------------------------------------------------------- item 1
 
@@ -454,6 +538,240 @@ class Level1Validator:
             avg = sum(responses) / len(responses)
             r.desc += f" | avg response = {avg:.2f}, max = {max(responses)} ticks"
         out.append(r)
+        return out
+
+    # ------------------------------------------------------------- item 4
+
+    def check_item4(self) -> list[CheckResult]:
+        """Checks rubric item 4 (acceptance test, 11 pts).
+
+        Sub-items 4-1 (method description) and 4-2 (accept/reject rationality)
+        are graded from the written report and cannot be auto-verified, so they
+        are reported as SKIP. Sub-item 4-3 (sporadic value rate) is recomputed
+        from the schedule and scored against the rubric thresholds.
+        """
+        out: list[CheckResult] = []
+        for item, desc in (
+            ("4-1", "acceptance-test method description"),
+            ("4-2", "accept/reject decision rationality"),
+        ):
+            r = CheckResult(item, desc, 3)
+            r.status = "SKIP"
+            r.violations.append("report-graded -- not auto-verifiable")
+            out.append(r)
+        out.append(self._sporadic_value_rate())
+        return out
+
+    def _sporadic_value_rate(self) -> CheckResult:
+        """Item 4-3: sporadic value rate, scored by the rubric thresholds.
+
+        Rate = (execution slots of sporadic jobs completed before their hard
+        deadline) / (total sporadic execution slots). Scoring: 0 -> 0 pts,
+        (0, 0.4) -> 1, [0.4, 0.7) -> 2, >= 0.7 -> 3. The rubric lists 5 pts for
+        this row, but only this 0-3 threshold scale is concretely defined, so 3
+        is used as the auto-checkable maximum. SKIP when no sporadic jobs exist.
+        """
+        r = CheckResult("4-3", "sporadic value rate (max 3 of 5 auto-checkable)", 3)
+        sporadic = self._expand_sporadic_jobs()
+        if not sporadic:
+            r.status = "SKIP"
+            r.violations.append("no sporadic jobs in task_set -- nothing to check")
+            return r
+
+        completion = self._completion_times()
+        rejected = self._collect_field("rejected_sporadic")
+        total_exec = sum(j.execution for j in sporadic)
+        done_exec = sum(
+            j.execution
+            for j in sporadic
+            if j.job_id not in rejected
+            and completion.get(j.job_id, self._horizon + 1) <= j.deadline
+        )
+        rate = done_exec / total_exec if total_exec else 0.0
+
+        if rate <= 0.0:
+            r.score = 0.0
+        elif rate < 0.4:
+            r.score = 1.0
+        elif rate < 0.7:
+            r.score = 2.0
+        else:
+            r.score = 3.0
+        r.status = "PASS" if r.score > 0.0 else "FAIL"
+        r.desc += f" | rate = {rate:.4f} ({done_exec}/{total_exec} slots)"
+
+        # Cross-check against the evaluator's reported value, if available.
+        reported = (self._evaluation or {}).get("acceptance_test", {}).get(
+            "sporadic_value_rate"
+        )
+        if reported is not None and abs(float(reported) - rate) > 1e-3:
+            r.violations.append(
+                f"evaluator reports sporadic_value_rate={float(reported):.4f}"
+                f" but recomputed {rate:.4f}"
+            )
+        return r
+
+    # ------------------------------------------------------------- item 5
+
+    def check_item5(self) -> list[CheckResult]:
+        """Checks rubric item 5 (evaluation metrics, 7 pts).
+
+        Each metric is recomputed independently from the schedule and task set,
+        then cross-checked against ``evaluation_results.json``. A sub-item passes
+        when every value it covers matches the reported value within tolerance.
+        Reported as SKIP when no evaluation results were provided.
+        """
+        specs = [
+            ("5-1", "hard_deadline_miss_rate", 1.0),
+            ("5-2", "soft_deadline_miss_rate", 1.0),
+            ("5-3", "average/max tardiness", 2.0),
+            ("5-4", "average/max response time", 2.0),
+            ("5-5", "completion_time_jitter", 1.0),
+        ]
+        if self._evaluation is None:
+            out = []
+            for item, desc, max_score in specs:
+                r = CheckResult(item, desc, max_score)
+                r.status = "SKIP"
+                r.violations.append("evaluation_results.json not provided")
+                out.append(r)
+            return out
+
+        metrics = self._recompute_metrics()
+        out: list[CheckResult] = []
+        out.append(self._compare("5-1", "hard deadline miss rate", 1.0,
+                                  {"hard_deadline_miss_rate": metrics["hard_miss_rate"]}))
+        out.append(self._compare("5-2", "soft deadline miss rate", 1.0,
+                                  {"soft_deadline_miss_rate": metrics["soft_miss_rate"]}))
+        out.append(self._compare("5-3", "average/max tardiness", 2.0, {
+            "average_tardiness": metrics["avg_tardiness"],
+            "max_tardiness": metrics["max_tardiness"],
+        }))
+        out.append(self._compare("5-4", "average/max response time", 2.0, {
+            "average_response_time": metrics["avg_response"],
+            "max_response_time": metrics["max_response"],
+        }))
+        out.append(self._compare("5-5", "completion time jitter", 1.0,
+                                  {"completion_time_jitter": metrics["jitter"]}))
+        return out
+
+    def _recompute_metrics(self) -> dict[str, float]:
+        """Recomputes item-5 metrics from the raw schedule (mirrors Evaluator)."""
+        periodic = self._jobs
+        sporadic = self._expand_sporadic_jobs()
+        aperiodic = self._expand_aperiodic_jobs()
+        completion = self._completion_times()
+        rejected = self._collect_field("rejected_sporadic")
+
+        # Aperiodic misses: schedule flags plus jobs not done by their deadline.
+        missed_aperiodic = self._collect_field("missed_aperiodic")
+        for job in aperiodic:
+            ct = completion.get(job.job_id)
+            if ct is None or ct > job.deadline:
+                missed_aperiodic.add(job.job_id)
+
+        # Hard deadline miss rate over periodic + sporadic jobs.
+        hard_miss = 0
+        for job in periodic:
+            ct = completion.get(job.job_id)
+            if ct is None or ct > job.deadline:
+                hard_miss += 1
+        for job in sporadic:
+            if job.job_id in rejected:
+                hard_miss += 1
+            else:
+                ct = completion.get(job.job_id)
+                if ct is None or ct > job.deadline:
+                    hard_miss += 1
+        total_hard = len(periodic) + len(sporadic)
+        hard_miss_rate = hard_miss / total_hard if total_hard else 0.0
+
+        total_soft = len(aperiodic)
+        soft_miss_rate = len(missed_aperiodic) / total_soft if total_soft else 0.0
+
+        # Tardiness / response over all scheduled non-rejected jobs.
+        tardiness: list[float] = []
+        response: list[float] = []
+        for job in periodic + sporadic + aperiodic:
+            if job.job_id in rejected:
+                continue
+            ct = completion.get(job.job_id)
+            if ct is None:
+                continue
+            tardiness.append(max(0.0, ct - job.deadline))
+            response.append(float(ct - job.release))
+
+        # Completion-time jitter: peak-to-peak per periodic task (>= 2 instances).
+        task_cts: dict[str, list[int]] = {}
+        for job in periodic:
+            ct = completion.get(job.job_id)
+            if ct is not None:
+                task_cts.setdefault(job.task_id, []).append(ct)
+        jitter_vals = [
+            max(cts) - min(cts) for cts in task_cts.values() if len(cts) >= 2
+        ]
+
+        return {
+            "hard_miss_rate": hard_miss_rate,
+            "soft_miss_rate": soft_miss_rate,
+            "avg_tardiness": sum(tardiness) / len(tardiness) if tardiness else 0.0,
+            "max_tardiness": max(tardiness) if tardiness else 0.0,
+            "avg_response": sum(response) / len(response) if response else 0.0,
+            "max_response": max(response) if response else 0.0,
+            "jitter": sum(jitter_vals) / len(jitter_vals) if jitter_vals else 0.0,
+        }
+
+    def _compare(
+        self,
+        item: str,
+        desc: str,
+        max_score: float,
+        recomputed: dict[str, float],
+        tol: float = 1e-3,
+    ) -> CheckResult:
+        """Builds a result that fails if any reported metric differs from ours.
+
+        Args:
+            item: Rubric sub-item id.
+            desc: Human-readable description.
+            max_score: Points for this sub-item.
+            recomputed: Mapping of ``evaluation_results.json`` key -> our value.
+            tol: Absolute tolerance for the comparison.
+        """
+        r = CheckResult(item, desc, max_score)
+        shown: list[str] = []
+        assert self._evaluation is not None
+        for key, ours in recomputed.items():
+            reported = self._evaluation.get(key)
+            shown.append(f"{key}={ours:.4f}")
+            if reported is None:
+                r.violations.append(f"{key} missing from evaluation_results.json")
+            elif abs(float(reported) - ours) > tol:
+                r.violations.append(
+                    f"{key}: recomputed {ours:.4f} != reported {float(reported):.4f}"
+                )
+        self._finalize(r)
+        r.desc += " | " + ", ".join(shown)
+        return r
+
+    # ------------------------------------------------------------- item 6
+
+    def check_item6(self) -> list[CheckResult]:
+        """Checks rubric item 6 (reserve-strategy analysis, 10 pts).
+
+        Both sub-items (reserve-strategy description and objective trade-off
+        analysis) are graded from the written report using actual scheduling
+        data, so neither can be auto-verified; both report as SKIP.
+        """
+        out: list[CheckResult] = []
+        for item, desc in (
+            ("6-1", "reserve-strategy algorithm description"),
+            ("6-2", "objective-function trade-off analysis"),
+        ):
+            r = CheckResult(item, desc, 5)
+            r.status = "SKIP"
+            r.violations.append("report-graded -- not auto-verifiable")
+            out.append(r)
         return out
 
     # ---------------------------------------------------- constraint checks
@@ -830,7 +1148,14 @@ class Level1Validator:
 
     def validate(self) -> list[CheckResult]:
         """Runs all Level 1 checks and returns the ordered results."""
-        return self.check_item1() + self.check_item2() + self.check_item3()
+        return (
+            self.check_item1()
+            + self.check_item2()
+            + self.check_item3()
+            + self.check_item4()
+            + self.check_item5()
+            + self.check_item6()
+        )
 
 
 def _print_report(results: list[CheckResult]) -> float:
@@ -853,7 +1178,8 @@ def _print_report(results: list[CheckResult]) -> float:
             print(f"            - ... (+{len(r.violations) - 10} more)")
     print("-" * 72)
     print(f"  Self-grade (excluding SKIP): {total:.1f} / {total_max:.0f}")
-    print("  NOTE: items 2-2 (aperiodic), 4, 5, 6 are not covered here.")
+    print("  NOTE: SKIP rows (4-1, 4-2, 6-1, 6-2 and any check whose inputs are")
+    print("        absent) are report-graded or not applicable; excluded above.")
     print("=" * 72)
     return total
 
@@ -864,6 +1190,7 @@ def main() -> None:
     parser.add_argument("--task-set", default="output/task_set.json")
     parser.add_argument("--schedule", default="output/schedule_result.json")
     parser.add_argument("--settings", default="input/processor_settings.json")
+    parser.add_argument("--evaluation", default="output/evaluation_results.json")
     parser.add_argument("--horizon", type=int, default=_HORIZON)
     parser.add_argument("--eps", type=float, default=_EPS)
     args = parser.parse_args()
@@ -872,12 +1199,14 @@ def main() -> None:
         task_set=_load_json(args.task_set),
         schedule=_load_json(args.schedule),
         settings=_load_json(args.settings),
+        evaluation=_load_json_optional(args.evaluation),
         horizon=args.horizon,
         eps=args.eps,
     )
-    total = _print_report(validator.validate())
+    results = validator.validate()
+    _print_report(results)
     # Non-zero exit if any covered constraint is violated, for CI use.
-    failed = any(r.status == "FAIL" for r in validator.validate())
+    failed = any(r.status == "FAIL" for r in results)
     raise SystemExit(1 if failed else 0)
 
 
