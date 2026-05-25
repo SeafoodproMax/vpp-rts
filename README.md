@@ -127,13 +127,44 @@ Reads the solved schedule and computes all required performance metrics:
 | `market_revenue` | Σ (λ_t · Sell_t) |
 | `objective_value` | α·f1 + f2 − market\_revenue |
 
+## Level 2 — Relaxed assumptions + advanced dynamic scheduling
+
+Level 2 relaxes three Level 1 assumptions and adds a rolling-horizon dynamic
+scheduler. See **`report_level2.md`** for the full write-up (rubric items 3, 8).
+
+```bash
+# Full comparison pipeline: generate → static (L1) → dynamic (L2) → print comparison
+python -c "from src.main import run_level2; run_level2()"
+
+# Dynamic scheduler only (reads the existing output/task_set.json)
+python -m src.advanced_scheduler
+```
+
+- **Relaxed assumptions (`src/rt_scheduler/relaxation.py`, `formulator.py`):** renewable
+  forecast uncertainty (derated cap), realistic storage (charge/discharge efficiency,
+  self-discharge, cycle/throughput limit, SOC-dependent power, aging cost), and job
+  precedence. All are expressed with the Level 1 decision variables — **no new
+  decision variable is added** — and default to no-ops so the Level 1 schedule is
+  unchanged. Parameters live in **`runtime_config.json`**.
+- **Advanced dynamic scheduler (`src/advanced_scheduler.py`):** receding-horizon
+  re-optimization. It walks the 72-tick horizon, re-solving the remaining horizon at a
+  periodic cadence and on events (sporadic arrivals, large renewable deviations). Each
+  re-solve pins the executed prefix, reveals realized PV (vs the derated forecast tail)
+  and newly arrived sporadic/aperiodic jobs, and admits them by reservation
+  feasibility. A MIP gap / time limit keeps each solve tractable.
+
+Level 2 writes `*_dynamic` artifacts alongside the Level 1 outputs:
+`output/schedule_result_dynamic.json`, `output/evaluation_results_dynamic.json`,
+`output/acceptance_test_log_dynamic.json`, `output/dynamic_run_log.json`.
+
 ## Project structure
 
 ```
 src/
-├── main.py                      # Pipeline entry point
+├── main.py                      # Pipeline entry point (run_level2 = L1 + L2 + compare)
 ├── config.py                    # Centralised paths and constants
 ├── validator.py                 # Level 1 self-check (stdlib only)
+├── advanced_scheduler.py        # Level 2: rolling-horizon dynamic scheduler
 ├── generator/                   # Phase 1: task set generation
 │   ├── task_set_generator.py
 │   ├── frame_size_calculator.py
@@ -141,8 +172,9 @@ src/
 ├── rt_scheduler/                # Phase 2 + 3: MILP scheduler + acceptance test
 │   ├── rt_scheduler.py          # Orchestrator (calls AcceptanceTester at end)
 │   ├── acceptance_tester.py     # Sporadic/aperiodic scheduling on reserve
+│   ├── relaxation.py            # Level 2: RelaxationConfig (relaxed-assumption params)
 │   ├── expander.py              # Expands tasks → concrete jobs
-│   ├── formulator.py            # Builds PuLP problem (23 constraints)
+│   ├── formulator.py            # Builds PuLP problem (23 constraints + L2 relaxations)
 │   └── extractor.py             # Parses solved variables → JSON + reserve
 ├── evaluator/                   # Phase 4: performance metrics
 │   └── evaluator.py
@@ -158,11 +190,20 @@ input/
 ├── processor_settings.json      # VPP asset configuration
 └── price_72hr.json              # 72-hour market price forecast
 
+references/
+└── demo_jobs.json               # Sporadic/aperiodic jobs merged into the task set
+
+runtime_config.json              # Level 2 relaxation + dynamic-cadence parameters
+
 output/                          # git-ignored, generated at runtime
 ├── task_set.json
-├── schedule_result.json
+├── schedule_result.json                 # Level 1 static schedule
 ├── acceptance_test_log.json
-└── evaluation_results.json
+├── evaluation_results.json
+├── schedule_result_dynamic.json         # Level 2 dynamic schedule
+├── acceptance_test_log_dynamic.json
+├── dynamic_run_log.json                 # per-round re-optimization log
+└── evaluation_results_dynamic.json
 ```
 
 ## Running tests

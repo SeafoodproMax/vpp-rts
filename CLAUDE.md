@@ -9,13 +9,18 @@ VPP-RTS is a Virtual Power Plant real-time scheduling system for an NCKU homewor
 3. **Phase 3 — Acceptance Test** (`src/rt_scheduler/acceptance_tester.py`): **already implemented and integrated into `RTScheduler.run()`.** Uses the reserve left by Phase 2 to accept/reject sporadic hard-deadline jobs and schedule/miss aperiodic soft-deadline jobs. Annotates each schedule record with `accepted_sporadic`, `scheduled_aperiodic`, `rejected_sporadic`, and `missed_aperiodic` fields.
 4. **Phase 4 — Evaluation** (`src/evaluator/`): reads the schedule (including acceptance-test annotations from Phase 3) and computes all performance metrics. Output: `output/evaluation_results.json`.
 
+**Level 2 (implemented):** relaxes three Level 1 assumptions and adds a rolling-horizon dynamic scheduler. Run via `run_level2()` in `src/main.py` (generate → static L1 → dynamic L2 → comparison) or `python -m src.advanced_scheduler`. See `report_level2.md`.
+- **Relaxed assumptions** (`src/rt_scheduler/relaxation.py` + `formulator.py`): renewable uncertainty (derated C13′), realistic storage (charge/discharge efficiency, self-discharge, cycle/throughput limit, SOC-dependent power, aging cost — C16′/C18′ + R-cycle/R-soc/R-aging), and job precedence (R-prec). All reuse the Level 1 decision variables — **no new decision variable** — and default to no-ops (`RelaxationConfig()` ⇒ identical Level 1 model). Parameters live in `runtime_config.json`.
+- **`AdvancedScheduler`** (`src/advanced_scheduler.py`): receding-horizon re-optimization. Re-solves the remaining horizon at a periodic cadence + events (sporadic arrivals, renewable deviation); `VppMilpFormulator.pin_prefix` freezes the executed prefix (continuous + derived binaries) so presolve collapses it; committed block uses realized PV, tail uses derated forecast; sporadic/aperiodic admitted by reservation feasibility (`reserve_floor` ⇒ `Sell[t] ≥ R_t`). Each solve uses a MIP gap + time limit for tractability. Writes `output/*_dynamic.json` + `output/dynamic_run_log.json`.
+
 ## Architecture
 
 ```
 src/
-├── main.py                  # Pipeline entry: generate_task_set() -> run_scheduler() -> run_evaluator()
+├── main.py                  # Pipeline entry: generate_task_set() -> run_scheduler() -> run_evaluator(); run_level2()
 ├── config.py                # VppConfig: centralised paths & magic numbers
 ├── validator.py             # Level 1 self-grading rubric (stdlib only)
+├── advanced_scheduler.py    # Level 2: AdvancedScheduler rolling-horizon re-optimization
 ├── generator/               # Phase 1: task set generation
 │   ├── task_set_generator.py
 │   ├── frame_size_calculator.py
@@ -23,8 +28,9 @@ src/
 ├── rt_scheduler/            # Phase 2 + 3: MILP scheduler and acceptance testing
 │   ├── rt_scheduler.py      # RTScheduler orchestrator (runs AcceptanceTester at end)
 │   ├── acceptance_tester.py # AcceptanceTester: sporadic/aperiodic scheduling on reserve
+│   ├── relaxation.py        # Level 2: RelaxationConfig relaxed-assumption parameters
 │   ├── expander.py          # JobExpander: periodic tasks → ExpandedJob instances
-│   ├── formulator.py        # VppMilpFormulator: builds PuLP problem with 23 constraints
+│   ├── formulator.py        # VppMilpFormulator: 23 constraints + Level 2 relaxations + pin_prefix
 │   └── extractor.py         # SchedulerResultExtractor: parses solved variables → JSON
 ├── evaluator/               # Phase 4: post-schedule metrics computation
 │   └── evaluator.py         # Evaluator: reads schedule + inputs → evaluation_results.json

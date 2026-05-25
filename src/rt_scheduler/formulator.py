@@ -1,5 +1,7 @@
 """PuLP MILP formulation for the Virtual Power Plant scheduling problem."""
 
+from typing import Any
+
 import pulp
 from src.model import (
     ExpandedJob,
@@ -8,6 +10,7 @@ from src.model import (
     PriceSystem,
     Storage,
 )
+from src.rt_scheduler.relaxation import RelaxationConfig
 
 
 class VppMilpFormulator:
@@ -15,6 +18,12 @@ class VppMilpFormulator:
 
     This class handles variable creation, objective setup, and constraint declaration
     for the real-time Virtual Power Plant (VPP) system over a planning horizon.
+
+    Level 2 relaxed-assumption modelling is opt-in via ``relaxation`` and the
+    reserve (day-ahead reservation) strategy via ``reserve_floor``; both default to
+    no-ops so the Level 1 day-ahead formulation is reproduced exactly. None of the
+    relaxed constraints introduce a new decision variable -- they are expressed with
+    the Level 1 variables ``P``, ``k``, ``SOC``, ``Sell`` and ``x``.
     """
 
     _DELTA_T: int = 1
@@ -25,6 +34,9 @@ class VppMilpFormulator:
         prices: PriceSystem,
         all_jobs: list[ExpandedJob],
         horizon: int,
+        *,
+        relaxation: RelaxationConfig | None = None,
+        reserve_floor: dict[int, float] | None = None,
     ) -> None:
         """Initializes the formulator with assets, prices, and jobs.
 
@@ -33,11 +45,18 @@ class VppMilpFormulator:
             prices: The day-ahead hourly price list.
             all_jobs: The combined list of expanded regular and charging jobs.
             horizon: The scheduling horizon duration (in ticks).
+            relaxation: Optional Level 2 relaxed-assumption parameters. ``None``
+                (the default) reproduces the Level 1 formulation.
+            reserve_floor: Optional per-tick lower bound on ``Sell[t]`` (MWh). The
+                day-ahead reservation strategy keeps this much redirectable surplus
+                available for sporadic/aperiodic acceptance. ``None`` disables it.
         """
         self._assets = assets
         self._prices = prices
         self._all_jobs = all_jobs
         self._horizon = horizon
+        self._relax = relaxation or RelaxationConfig()
+        self._reserve_floor = reserve_floor or {}
 
         self._regular_jobs = [j for j in all_jobs if not j.is_charging]
         self._charging_jobs = [j for j in all_jobs if j.is_charging]
@@ -143,7 +162,12 @@ class VppMilpFormulator:
         return self._regular_jobs
 
     def formulate(self) -> None:
-        """Formulates the variables, objective, and all 23 constraints."""
+        """Formulates the variables, objective, and all constraints.
+
+        Beyond the 23 Level 1 constraints this also adds, when the corresponding
+        relaxation/reserve options are enabled, the Level 2 relaxed-assumption
+        constraints (R-prefixed) and the reservation-strategy floor.
+        """
         self._create_variables()
         self._add_objective()
         self._add_job_constraints()
@@ -151,6 +175,8 @@ class VppMilpFormulator:
         self._add_renewable_constraints()
         self._add_storage_constraints()
         self._add_power_balance_constraints()
+        self._add_precedence_constraints()
+        self._add_reserve_floor_constraints()
 
     def _create_variables(self) -> None:
         """Declares all decision variables for the MILP solver."""
@@ -214,7 +240,13 @@ class VppMilpFormulator:
             }
 
     def _add_objective(self) -> None:
-        """Defines the objective function (minimize gen cost - maximize sell revenue)."""
+        """Defines the objective function (minimize gen cost - maximize sell revenue).
+
+        With the Level 2 storage relaxation a battery aging term is added: each MWh
+        discharged carries an ``aging_cost`` so the optimizer trades cycling the
+        battery against running generators. The term is zero (and absent) under the
+        Level 1 default.
+        """
         f2 = pulp.lpSum(
             self._gen_map[i].cost_fixed * self._u[i][t]
             + self._gen_map[i].cost_variable * self._P[i][t]
@@ -224,7 +256,15 @@ class VppMilpFormulator:
         f3 = -pulp.lpSum(
             self._price_map[t] * self._Sell[t] for t in self._time_steps
         )
-        self._prob += f2 + f3, "objective"
+        objective = f2 + f3
+        if self._relax.aging_cost > 0.0:
+            # R-aging: battery throughput (discharge) aging cost, reusing P[storage].
+            objective += pulp.lpSum(
+                self._relax.aging_cost * self._P[i][t]
+                for i in self._sto_ids
+                for t in self._time_steps
+            )
+        self._prob += objective, "objective"
 
     def _add_job_constraints(self) -> None:
         """Declares task execution, demand, and preemption constraints."""
@@ -357,22 +397,55 @@ class VppMilpFormulator:
                     )
 
     def _add_renewable_constraints(self) -> None:
-        """Declares renewable capacity upper bounds based on hourly solar forecasts."""
+        """Declares renewable capacity upper bounds based on hourly solar forecasts.
+
+        C13 (Level 1): ``P[i][t] <= capacity * forecast * dt``.
+
+        R-uncertainty (Level 2, Assumption 11): the forecast is derated by
+        ``renewable_uncertainty_margin`` (beta) so the plan keeps headroom against
+        an over-forecast, giving ``P[i][t] <= capacity * forecast * (1 - beta) * dt``.
+        beta = 0 reproduces C13 exactly.
+        """
+        keep = 1.0 - self._relax.renewable_uncertainty_margin
         for i in self._ren_ids:
             cap = self._capacity_map[i]
             forecasts = self._forecast_map[i]
             for t in self._time_steps:
                 forecast = forecasts.get(t, 0.0)
                 self._prob += (
-                    self._P[i][t] <= cap * forecast * self._DELTA_T,
+                    self._P[i][t] <= cap * forecast * keep * self._DELTA_T,
                     f"C13_rencap_{i}_{t}",
                 )
 
     def _add_storage_constraints(self) -> None:
-        """Declares storage battery discharge, charge limits, and SOC balance constraints."""
+        """Declares storage battery discharge, charge limits, and SOC balance constraints.
+
+        Level 1: C14 (discharge cap), C15 (charge cap), C16 (SOC balance),
+        C18 (discharge limited by usable SOC), C19 (no simultaneous charge/discharge).
+
+        Level 2 (Assumption 12 -- realistic storage) refines these *in place* using
+        the relaxation parameters, all reproducing the Level 1 equation when the
+        parameters are at their defaults:
+
+        * R-eff-c / R-eff-d / R-self (in C16): SOC balance becomes
+          ``SOC[t] = (1 - sigma) * SOC[t-1] + eta_c * charge_in - P[t] / eta_d``.
+        * R-eff-d (in C18): energy drawn from the cell to deliver ``P[t]`` is
+          ``P[t] / eta_d``, bounded by usable SOC ``(1 - sigma) * SOC[t-1] - soc_min``.
+        * R-soc-dis / R-soc-chg: SOC-dependent power tapers the rated discharge/charge
+          power linearly down to ``soc_power_floor`` at the unfavourable SOC extreme.
+        * R-cycle: total discharged energy over the horizon is capped by
+          ``cycle_limit * (soc_max - soc_min)``.
+        """
+        relax = self._relax
+        eta_c = relax.charge_efficiency
+        eta_d = relax.discharge_efficiency
+        sigma = relax.self_discharge_rate
+        floor = relax.soc_power_floor
+
         for i in self._sto_ids:
             sto = self._sto_map[i]
             chg_jid = self._storage_charging_job[i]
+            usable = float(sto.soc_max - sto.soc_min)
 
             for t in self._time_steps:
                 # C14: discharge cap
@@ -394,21 +467,23 @@ class VppMilpFormulator:
                     f"C15_chgcap_{i}_{t}",
                 )
 
-                # C16: SOC balance
                 soc_prev = (
                     self._SOC[i][t - 1] if t > 1 else float(sto.soc_init)
                 )
+
+                # C16: SOC balance (with efficiency + self-discharge when relaxed)
                 self._prob += (
-                    self._SOC[i][t] == soc_prev + charge_in - self._P[i][t],
+                    self._SOC[i][t]
+                    == (1.0 - sigma) * soc_prev
+                    + eta_c * charge_in
+                    - (1.0 / eta_d) * self._P[i][t],
                     f"C16_socbal_{i}_{t}",
                 )
 
-                # C18: discharge limit vs SOC
-                soc_prev_val = (
-                    self._SOC[i][t - 1] if t > 1 else float(sto.soc_init)
-                )
+                # C18: discharge limited by usable stored energy
                 self._prob += (
-                    self._P[i][t] <= soc_prev_val - sto.soc_min,
+                    (1.0 / eta_d) * self._P[i][t]
+                    <= (1.0 - sigma) * soc_prev - sto.soc_min,
                     f"C18_dislim_{i}_{t}",
                 )
 
@@ -416,6 +491,32 @@ class VppMilpFormulator:
                 self._prob += (
                     self._charge_b[i][t] + self._discharge_b[i][t] <= 1,
                     f"C19_nosim_{i}_{t}",
+                )
+
+                # R-soc-dis / R-soc-chg: SOC-dependent power limit (taper to floor).
+                if floor < 1.0 and usable > 0:
+                    dis_factor = floor + (1.0 - floor) * (
+                        (soc_prev - sto.soc_min) / usable
+                    )
+                    self._prob += (
+                        self._P[i][t]
+                        <= sto.discharge_max * self._DELTA_T * dis_factor,
+                        f"Rsocdis_{i}_{t}",
+                    )
+                    chg_factor = floor + (1.0 - floor) * (
+                        (sto.soc_max - soc_prev) / usable
+                    )
+                    self._prob += (
+                        charge_in <= sto.charge_max * self._DELTA_T * chg_factor,
+                        f"Rsocchg_{i}_{t}",
+                    )
+
+            # R-cycle: throughput limit over the whole horizon (reuses P[storage]).
+            if relax.cycle_limit is not None and usable > 0:
+                self._prob += (
+                    pulp.lpSum(self._P[i][t] for t in self._time_steps)
+                    <= relax.cycle_limit * usable,
+                    f"Rcycle_{i}",
                 )
 
     def _add_power_balance_constraints(self) -> None:
@@ -452,3 +553,118 @@ class VppMilpFormulator:
                     alloc <= self._P[i][t],
                     f"C20_devalloc_{i}_{t}",
                 )
+
+    def _add_precedence_constraints(self) -> None:
+        """Declares Level 2 job precedence constraints (Assumption 5 relaxation).
+
+        For an ordered pair ``(a, b)``, job ``b`` may only be active at tick ``t``
+        once job ``a`` has accumulated all ``e_a`` of its active ticks before ``t``:
+
+            ``e_a * x[b][t] <= sum_{s < t} x[a][s]``     for all t in b's window.
+
+        This reuses the Level 1 activity variable ``x`` and adds no new variable.
+        Pairs referencing a non-regular or unknown job ID are skipped.
+        """
+        if not self._relax.precedence:
+            return
+        exec_of = {job.job_id: job.execution for job in self._regular_jobs}
+        for a, b in self._relax.precedence:
+            if a not in self._x or b not in self._x or a not in exec_of:
+                continue
+            e_a = exec_of[a]
+            for t in self._x[b]:
+                self._prob += (
+                    e_a * self._x[b][t]
+                    <= pulp.lpSum(
+                        self._x[a][s] for s in self._x[a] if s < t
+                    ),
+                    f"Rprec_{a}_before_{b}_{t}",
+                )
+
+    def _add_reserve_floor_constraints(self) -> None:
+        """Declares the day-ahead reservation floor ``Sell[t] >= reserve_floor[t]``.
+
+        The reservation strategy forces the plan to keep at least ``reserve_floor[t]``
+        MWh of redirectable surplus (sold, by C23) at tick ``t``, so that surplus is
+        available to accept sporadic/aperiodic jobs at acceptance time. It reuses the
+        Level 1 ``Sell`` variable and adds no new variable.
+        """
+        for t, floor in self._reserve_floor.items():
+            if floor > 0 and t in self._Sell:
+                self._prob += (
+                    self._Sell[t] >= floor,
+                    f"Rreserve_{t}",
+                )
+
+    def pin_prefix(
+        self,
+        committed_by_tick: dict[int, dict[str, Any]],
+        upto_tick: int,
+        tol: float = 1e-6,
+    ) -> None:
+        """Freezes already-executed ticks for receding-horizon re-optimization.
+
+        Pins every continuous decision variable (``P``, ``k``, ``SOC``, ``Sell``) at
+        ticks ``t < upto_tick`` to the committed value, and fixes the prefix binaries
+        (``u``, ``charge_b``, ``discharge_b``, ``x``) derived from that committed
+        state. Pinning the continuous state alone carries generator on/off duration,
+        ramp position and SOC across the boundary; fixing the binaries as well lets
+        the solver's presolve collapse the frozen prefix, which keeps each re-solve
+        cheap as the committed window grows.
+
+        Args:
+            committed_by_tick: Map ``tick -> {"P", "k", "soc", "sell"}`` of committed
+                (raw, unrounded) values from the previous solve.
+            upto_tick: Exclusive upper bound; ticks strictly below it are frozen.
+            tol: Tolerance band applied around each pinned value to absorb float noise.
+        """
+
+        def _pin(var: pulp.LpVariable, value: float) -> None:
+            low, up = value - tol, value + tol
+            if var.lowBound is not None:
+                low = max(low, var.lowBound)
+            if var.upBound is not None:
+                up = min(up, var.upBound)
+            var.bounds(low, up)
+
+        def _fix_bin(var: pulp.LpVariable, on: bool) -> None:
+            var.bounds(1, 1) if on else var.bounds(0, 0)
+
+        for t in self._time_steps:
+            if t >= upto_tick:
+                continue
+            rec = committed_by_tick.get(t, {})
+            p_vals = rec.get("P", {})
+            for i in self._all_device_ids:
+                _pin(self._P[i][t], float(p_vals.get(i, 0.0)))
+
+            k_vals = rec.get("k", {})
+            for job in self._all_jobs:
+                alloc = k_vals.get(job.job_id, {})
+                for i, var_by_t in self._k[job.job_id].items():
+                    if t in var_by_t:
+                        _pin(var_by_t[t], float(alloc.get(i, 0.0)))
+
+            soc_vals = rec.get("soc", {})
+            for i in self._sto_ids:
+                if i in soc_vals:
+                    _pin(self._SOC[i][t], float(soc_vals[i]))
+
+            if "sell" in rec:
+                _pin(self._Sell[t], float(rec["sell"]))
+
+            # Fix prefix binaries from the committed continuous state so presolve
+            # can eliminate the frozen window.
+            for i in self._gen_ids:
+                _fix_bin(self._u[i][t], float(p_vals.get(i, 0.0)) > tol)
+            for i in self._sto_ids:
+                _fix_bin(self._discharge_b[i][t], float(p_vals.get(i, 0.0)) > tol)
+                chg_jid = self._storage_charging_job.get(i)
+                charge_in = sum(
+                    k_vals.get(chg_jid, {}).values()
+                ) if chg_jid else 0.0
+                _fix_bin(self._charge_b[i][t], charge_in > tol)
+            for job in self._regular_jobs:
+                if t in self._x.get(job.job_id, {}):
+                    k_sum = sum(k_vals.get(job.job_id, {}).values())
+                    _fix_bin(self._x[job.job_id][t], k_sum > tol)

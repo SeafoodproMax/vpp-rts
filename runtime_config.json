@@ -1,0 +1,24 @@
+{
+    "relaxation": {
+        "charge_efficiency": 0.95,
+        "discharge_efficiency": 0.95,
+        "self_discharge_rate": 0.002,
+        "cycle_limit": 3.0,
+        "soc_power_floor": 0.5,
+        "aging_cost": 2.0,
+        "renewable_uncertainty_margin": 0.15,
+        "precedence": []
+    },
+    "dynamic": {
+        "reopt_interval": 24,
+        "renewable_noise_std": 0.2,
+        "renewable_deviation_threshold": 0.25,
+        "seed": 42,
+        "max_reserve_per_tick": 120.0,
+        "max_solves": 80,
+        "max_deviation_triggers": 3,
+        "gap_rel": 0.05,
+        "time_limit": 20,
+        "threads": 4
+    }
+}
