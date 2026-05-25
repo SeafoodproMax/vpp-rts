@@ -1,6 +1,6 @@
 # vpp-rts
 
-NCKU Real-Time Systems homework — a Virtual Power Plant (VPP) real-time scheduling system that generates a periodic task set, solves a day-ahead MILP schedule, and evaluates the result.
+NCKU Real-Time Systems homework — a Virtual Power Plant (VPP) real-time scheduling system that generates a periodic task set, solves a day-ahead MILP schedule, runs an acceptance test for sporadic/aperiodic jobs, and evaluates the result.
 
 ## Quick start
 
@@ -16,13 +16,23 @@ pip install pulp pydantic
 python -m src.main
 ```
 
+## Self-check (Level 1)
+
+Validate the generated artifacts against the Level 1 grading rubric (items 1–3). Standard-library only — no Poetry environment required:
+
+```bash
+python3 -m src.validator
+```
+
+Reads `output/task_set.json`, `output/schedule_result.json` and `input/processor_settings.json`, prints a per-item pass/fail report with a self-grade, and exits non-zero on any covered violation. Constraint C4 (aperiodic) is reported as `SKIP` until aperiodic handling lands.
+
 ## Pipeline
 
-The full pipeline runs three phases in sequence:
+The full pipeline runs four phases in sequence:
 
 ```
 Phase 1 — Task Generation
-  → output/task_set.json
+  → output/task_set.json   (periodic tasks; add sporadic/aperiodic entries manually)
 
 Phase 2 — Day-Ahead Scheduling (MILP)
   ← input/processor_settings.json
@@ -30,10 +40,10 @@ Phase 2 — Day-Ahead Scheduling (MILP)
   ← output/task_set.json
   → output/schedule_result.json
 
-Phase 3 — Acceptance Test  ⚠️ not yet implemented
-  ← output/schedule_result.json  (read + update)
-  ← output/task_set.json         (sporadic / aperiodic tasks)
-  → output/schedule_result.json  (with rejected_sporadic / missed_aperiodic)
+Phase 3 — Acceptance Test  (integrated into RTScheduler.run())
+  ← reserve computed by Phase 2 solver
+  ← output/task_set.json   (sporadic / aperiodic tasks)
+  → output/schedule_result.json  (annotated with rejected_sporadic / missed_aperiodic)
 
 Phase 4 — Evaluation
   ← input/processor_settings.json
@@ -65,6 +75,8 @@ Each task has the following fields:
 | `w` | Energy demand (MWh/h) |
 | `preempt` | `1` = preemptible, `0` = non-preemptive |
 
+The output `task_set.json` also includes empty `sporadic` and `aperiodic` sections. Add entries there before running Phase 2 to exercise the acceptance test.
+
 ### Phase 2 — Day-Ahead Scheduling
 
 Expands periodic tasks into concrete jobs over the 72-hour horizon and solves a PuLP MILP problem with 23 constraints covering:
@@ -81,13 +93,18 @@ Expands periodic tasks into concrete jobs over the 72-hour horizon and solves a 
 - `f2` = Σ (cost\_fixed · min(1, P) + cost\_variable · P) for generators
 - `f3` = −Σ (λ_t · Sell_t) (market revenue, negated for minimisation)
 
-### Phase 3 — Acceptance Test ⚠️ Not yet implemented
+### Phase 3 — Acceptance Test
 
-Processes sporadic (hard-deadline) and aperiodic (soft-deadline) jobs at runtime:
-- **Sporadic jobs**: run acceptance test → accept if insertable without violating any constraint, reject otherwise → record in `rejected_sporadic`
-- **Aperiodic jobs**: enqueue and schedule opportunistically → record in `missed_aperiodic` if soft deadline exceeded
+Processes sporadic (hard-deadline) and aperiodic (soft-deadline) jobs using the reserve left by the MILP solver. **Implemented in `AcceptanceTester` and automatically called inside `RTScheduler.run()`.**
 
-Updates `schedule_result.json` in-place so Phase 4 can compute accurate sporadic/aperiodic metrics.
+| Task type | Rule |
+|---|---|
+| Sporadic | Hard deadline. Accepted only if it can finish between `r` and `r + d - 1`; otherwise recorded in `rejected_sporadic`. |
+| Aperiodic | Soft deadline. Scheduled when enough reserve exists; otherwise recorded in `missed_aperiodic`. |
+| `preempt = 1` | May use non-contiguous slots. |
+| `preempt = 0` | Must use one contiguous execution window. |
+
+Accepted/scheduled jobs consume reserve by `w` for each of their `e` execution ticks. To exercise this phase, add sporadic/aperiodic entries to `output/task_set.json` before running Phase 2.
 
 ### Phase 4 — Evaluation
 
@@ -107,24 +124,24 @@ Reads the solved schedule and computes all required performance metrics:
 | `market_revenue` | Σ (λ_t · Sell_t) |
 | `objective_value` | α·f1 + f2 − market\_revenue |
 
-> **Note:** sporadic and aperiodic job acceptance test is not yet implemented. The evaluator already reads `rejected_sporadic` and `missed_aperiodic` from the schedule; once the acceptance test is wired in, all metrics will update automatically.
-
 ## Project structure
 
 ```
 src/
 ├── main.py                      # Pipeline entry point
 ├── config.py                    # Centralised paths and constants
+├── validator.py                 # Level 1 self-check (stdlib only)
 ├── generator/                   # Phase 1: task set generation
 │   ├── task_set_generator.py
 │   ├── frame_size_calculator.py
 │   └── task_set_validator.py
-├── rt_scheduler/                # Phase 2: MILP day-ahead scheduler
-│   ├── rt_scheduler.py          # Orchestrator
+├── rt_scheduler/                # Phase 2 + 3: MILP scheduler + acceptance test
+│   ├── rt_scheduler.py          # Orchestrator (calls AcceptanceTester at end)
+│   ├── acceptance_tester.py     # Sporadic/aperiodic scheduling on reserve
 │   ├── expander.py              # Expands tasks → concrete jobs
 │   ├── formulator.py            # Builds PuLP problem (23 constraints)
-│   └── extractor.py             # Parses solved variables → JSON
-├── evaluator/                   # Phase 3: performance metrics
+│   └── extractor.py             # Parses solved variables → JSON + reserve
+├── evaluator/                   # Phase 4: performance metrics
 │   └── evaluator.py
 ├── model/                       # Pydantic data models
 │   ├── base/base_model.py
