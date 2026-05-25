@@ -66,7 +66,8 @@ class RTScheduler:
         """Executes the full scheduling pipeline.
 
         Returns:
-            A dictionary containing 'schedule_result' and 'reserve' mapping records.
+            A dictionary containing 'schedule_result', the per-tick 'reserve'
+            mapping, and the acceptance-test 'log' of per-job decisions.
         """
         # 1. Load configuration and tasks
         self._load_data_if_needed()

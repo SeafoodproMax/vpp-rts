@@ -15,6 +15,7 @@ class VppConfig(BaseModel):
     price_filename: str = "price_72hr.json"
     schedule_result_filename: str = "schedule_result.json"
     evaluation_results_filename: str = "evaluation_results.json"
+    acceptance_test_log_filename: str = "acceptance_test_log.json"
     # Demo-provided sporadic / aperiodic jobs merged into the generated task set.
     demo_jobs_filename: str = "aperiodic_n_sporadic_template.json"
 
@@ -41,6 +42,10 @@ class VppConfig(BaseModel):
     @property
     def evaluation_results_path(self) -> str:
         return os.path.join(self.output_dir, self.evaluation_results_filename)
+
+    @property
+    def acceptance_test_log_path(self) -> str:
+        return os.path.join(self.output_dir, self.acceptance_test_log_filename)
 
     @property
     def demo_jobs_path(self) -> str:
