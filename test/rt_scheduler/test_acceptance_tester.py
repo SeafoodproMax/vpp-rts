@@ -137,3 +137,64 @@ def test_marks_aperiodic_missed_when_cannot_complete_by_horizon() -> None:
     assert _ticks_with(result, "a1", "scheduled_aperiodic") == []
     # Insufficient reserve -> nothing routed, reserve untouched.
     assert result["reserve"][1] == 5.0
+
+
+def test_log_records_accepted_sporadic_decision() -> None:
+    """The log captures the accepted slots, completion tick and a rationale."""
+    schedule = _schedule({1: 10.0, 2: 3.0, 3: 10.0, 4: 10.0, 5: 0.0, 6: 0.0})
+    tasks = TaskSystem(
+        periodic_tasks=[],
+        sporadic_tasks=[SporadicTask(task_id="s1", r=1, e=3, d=4, w=10, preempt=1)],
+        aperiodic_tasks=[],
+    )
+
+    log = AcceptanceTester(schedule).run(tasks)["log"]
+
+    assert log["summary"]["sporadic"] == {"total": 1, "accepted": 1, "rejected": 0}
+    assert log["summary"]["sporadic_value_rate"] == 1.0
+    entry = log["sporadic"][0]
+    assert entry["decision"] == "accepted"
+    assert entry["scheduled_slots"] == [1, 3, 4]
+    assert entry["completion_tick"] == 4
+    assert entry["absolute_deadline"] == 4
+    assert "accepted" in entry["reason"]
+
+
+def test_log_records_rejected_sporadic_reason() -> None:
+    """A rejected sporadic job is logged with a reserve-shortfall reason."""
+    schedule = _schedule({1: 10.0, 2: 3.0, 3: 10.0, 4: 0.0, 5: 0.0, 6: 0.0})
+    tasks = TaskSystem(
+        periodic_tasks=[],
+        sporadic_tasks=[SporadicTask(task_id="s1", r=1, e=3, d=4, w=10, preempt=1)],
+        aperiodic_tasks=[],
+    )
+
+    log = AcceptanceTester(schedule).run(tasks)["log"]
+
+    assert log["summary"]["sporadic"] == {"total": 1, "accepted": 0, "rejected": 1}
+    assert log["summary"]["sporadic_value_rate"] == 0.0
+    entry = log["sporadic"][0]
+    assert entry["decision"] == "rejected"
+    assert entry["scheduled_slots"] == []
+    assert entry["completion_tick"] is None
+    assert entry["reason"].startswith("rejected:")
+
+
+def test_log_records_aperiodic_soft_miss() -> None:
+    """An aperiodic job completing past its soft deadline is logged as missed."""
+    schedule = _schedule({1: 5.0, 2: 0.0, 3: 0.0, 4: 5.0, 5: 0.0, 6: 0.0})
+    tasks = TaskSystem(
+        periodic_tasks=[],
+        sporadic_tasks=[],
+        aperiodic_tasks=[AperiodicTask(task_id="a1", r=1, e=2, d=2, w=5, preempt=1)],
+    )
+
+    log = AcceptanceTester(schedule).run(tasks)["log"]
+
+    assert log["summary"]["aperiodic"] == {"total": 1, "scheduled": 1, "missed": 1}
+    entry = log["aperiodic"][0]
+    assert entry["decision"] == "scheduled"
+    assert entry["missed"] is True
+    assert entry["completion_tick"] == 4
+    assert entry["soft_deadline"] == 2
+    assert "soft miss" in entry["reason"]

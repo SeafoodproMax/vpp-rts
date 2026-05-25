@@ -44,6 +44,7 @@ Phase 3 — Acceptance Test  (integrated into RTScheduler.run())
   ← reserve computed by Phase 2 solver
   ← output/task_set.json   (sporadic / aperiodic tasks)
   → output/schedule_result.json  (annotated with rejected_sporadic / missed_aperiodic)
+  → output/acceptance_test_log.json  (per-job accept/reject decisions + rationale)
 
 Phase 4 — Evaluation
   ← input/processor_settings.json
@@ -106,6 +107,8 @@ Processes sporadic (hard-deadline) and aperiodic (soft-deadline) jobs using the 
 
 Accepted/scheduled jobs consume reserve by `w` for each of their `e` execution ticks. To exercise this phase, add sporadic/aperiodic entries to `output/task_set.json` before running Phase 2.
 
+Every decision is written to `output/acceptance_test_log.json`: a `summary` block (accept/reject and scheduled/missed counts, sporadic value rate, leftover reserve per tick) plus per-job records carrying the chosen slots, completion tick, and a human-readable accept/reject rationale — directly supporting rubric items 4-1 (method) and 4-2 (decision rationality).
+
 ### Phase 4 — Evaluation
 
 Reads the solved schedule and computes all required performance metrics:
@@ -158,6 +161,7 @@ input/
 output/                          # git-ignored, generated at runtime
 ├── task_set.json
 ├── schedule_result.json
+├── acceptance_test_log.json
 └── evaluation_results.json
 ```
 

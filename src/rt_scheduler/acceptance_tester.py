@@ -43,6 +43,11 @@ class AcceptanceTester:
         }
         self._horizon = max(self._records_by_tick, default=0)
         self._spare = self._compute_device_spare()
+        # Per-job accept/reject decision records, populated during run().
+        self._log: dict[str, list[dict[str, Any]]] = {
+            "sporadic": [],
+            "aperiodic": [],
+        }
 
     def run(self, tasks: TaskSystem) -> dict[str, Any]:
         """Runs acceptance tests and updates schedule annotations.
@@ -51,16 +56,19 @@ class AcceptanceTester:
             tasks: Task aggregate containing sporadic and aperiodic jobs.
 
         Returns:
-            Dict with the updated ``schedule_result`` and the leftover ``reserve``
-            (remaining redirectable budget per tick after allocation).
+            Dict with the updated ``schedule_result``, the leftover ``reserve``
+            (remaining redirectable budget per tick after allocation), and a
+            ``log`` capturing each job's accept/reject decision and rationale.
         """
         self._ensure_result_fields()
         self._schedule_sporadic_tasks(tasks.sporadic_tasks)
         self._schedule_aperiodic_tasks(tasks.aperiodic_tasks)
 
+        reserve = {t: round(sum(s.values()), 4) for t, s in self._spare.items()}
         return {
             "schedule_result": self._schedule_result,
-            "reserve": {t: round(sum(s.values()), 4) for t, s in self._spare.items()},
+            "reserve": reserve,
+            "log": self._compose_log(reserve),
         }
 
     # ------------------------------------------------------------------ setup
@@ -96,21 +104,57 @@ class AcceptanceTester:
     def _schedule_sporadic_tasks(self, tasks: list[SporadicTask]) -> None:
         """Accepts only sporadic jobs that can complete before their hard deadline."""
         for task in tasks:
+            preemptive = task.preempt == 1
+            hard_deadline = self._absolute_deadline(task.r, task.d)
             slots = self._find_slots(
                 release=task.r,
-                latest=self._absolute_deadline(task.r, task.d),
+                latest=hard_deadline,
                 execution=task.e,
                 demand=task.w,
-                preemptive=task.preempt == 1,
+                preemptive=preemptive,
             )
+
+            entry: dict[str, Any] = {
+                "task_id": task.task_id,
+                "release": task.r,
+                "relative_deadline": task.d,
+                "absolute_deadline": hard_deadline,
+                "execution": task.e,
+                "demand": task.w,
+                "preemptive": preemptive,
+            }
 
             if not slots:
                 self._mark_task(task.r, "rejected_sporadic", task.task_id)
+                entry.update(
+                    decision="rejected",
+                    scheduled_slots=[],
+                    completion_tick=None,
+                    reason=self._infeasible_reason(
+                        "rejected",
+                        task.r,
+                        hard_deadline,
+                        task.e,
+                        task.w,
+                        preemptive,
+                    ),
+                )
+                self._log["sporadic"].append(entry)
                 continue
 
             for tick in slots:
                 self._route(tick, task.task_id, task.w)
                 self._mark_task(tick, "accepted_sporadic", task.task_id)
+            entry.update(
+                decision="accepted",
+                scheduled_slots=slots,
+                completion_tick=max(slots),
+                reason=(
+                    f"accepted: routed {task.e} slot(s) of {task.w} MWh from "
+                    f"day-ahead reserve within [{task.r}, {hard_deadline}]"
+                ),
+            )
+            self._log["sporadic"].append(entry)
 
     # -------------------------------------------------------------- aperiodic
 
@@ -122,26 +166,69 @@ class AcceptanceTester:
         last slot lands after the soft deadline is additionally flagged missed.
         """
         for task in tasks:
+            preemptive = task.preempt == 1
             soft_deadline = self._absolute_deadline(task.r, task.d)
             slots = self._find_slots(
                 release=task.r,
                 latest=self._horizon,
                 execution=task.e,
                 demand=task.w,
-                preemptive=task.preempt == 1,
+                preemptive=preemptive,
             )
+
+            entry: dict[str, Any] = {
+                "task_id": task.task_id,
+                "release": task.r,
+                "relative_deadline": task.d,
+                "soft_deadline": soft_deadline,
+                "execution": task.e,
+                "demand": task.w,
+                "preemptive": preemptive,
+            }
 
             if not slots:
                 # No reserve to complete it anywhere before H -> pure miss.
                 self._mark_task(task.r, "missed_aperiodic", task.task_id)
+                entry.update(
+                    decision="missed",
+                    missed=True,
+                    scheduled_slots=[],
+                    completion_tick=None,
+                    reason=self._infeasible_reason(
+                        "missed",
+                        task.r,
+                        self._horizon,
+                        task.e,
+                        task.w,
+                        preemptive,
+                    ),
+                )
+                self._log["aperiodic"].append(entry)
                 continue
 
             for tick in slots:
                 self._route(tick, task.task_id, task.w)
                 self._mark_task(tick, "scheduled_aperiodic", task.task_id)
 
-            if max(slots) > soft_deadline:
+            completion = max(slots)
+            late = completion > soft_deadline
+            if late:
                 self._mark_task(task.r, "missed_aperiodic", task.task_id)
+            entry.update(
+                decision="scheduled",
+                missed=late,
+                scheduled_slots=slots,
+                completion_tick=completion,
+                reason=(
+                    f"scheduled {task.e} slot(s); completes at tick {completion} "
+                    + (
+                        f"after soft deadline {soft_deadline} -> soft miss"
+                        if late
+                        else f"within soft deadline {soft_deadline}"
+                    )
+                ),
+            )
+            self._log["aperiodic"].append(entry)
 
     # ----------------------------------------------------------- allocation
 
@@ -183,6 +270,85 @@ class AcceptanceTester:
     def _budget(self, tick: int) -> float:
         """Returns the remaining redirectable reserve at a tick."""
         return sum(self._spare.get(tick, {}).values())
+
+    def _infeasible_reason(
+        self,
+        verdict: str,
+        release: int,
+        latest: int,
+        execution: int,
+        demand: int,
+        preemptive: bool,
+    ) -> str:
+        """Explains why a job could not be placed against the remaining reserve.
+
+        Args:
+            verdict: Decision label to prefix the message with (``rejected`` for
+                sporadic jobs, ``missed`` for aperiodic jobs that cannot finish
+                anywhere before the horizon end).
+            release: Earliest tick the job may run.
+            latest: Latest tick considered (hard deadline, or H for soft jobs).
+            execution: Number of slots the job needs.
+            demand: Energy required at each slot (MWh).
+            preemptive: Whether the job may use non-contiguous slots.
+
+        Returns:
+            A human-readable rationale referencing the actual reserve shortfall.
+        """
+        feasible = sum(
+            1
+            for t in range(release, latest + 1)
+            if self._budget(t) >= demand - _EPS
+        )
+        if preemptive:
+            return (
+                f"{verdict}: only {feasible} of {execution} required tick(s) in "
+                f"[{release}, {latest}] have >= {demand} MWh reserve"
+            )
+        return (
+            f"{verdict}: no contiguous {execution}-tick window in "
+            f"[{release}, {latest}] has >= {demand} MWh reserve in every tick "
+            f"({feasible} feasible tick(s) total)"
+        )
+
+    def _compose_log(self, reserve: dict[int, float]) -> dict[str, Any]:
+        """Assembles the acceptance-test log with a summary and per-job records.
+
+        Args:
+            reserve: Leftover redirectable reserve per tick after allocation.
+
+        Returns:
+            A serializable log with a ``summary`` block plus the ``sporadic`` and
+            ``aperiodic`` decision lists gathered during the run.
+        """
+        sporadic = self._log["sporadic"]
+        aperiodic = self._log["aperiodic"]
+        accepted = [e for e in sporadic if e["decision"] == "accepted"]
+        total_exec = sum(e["execution"] for e in sporadic)
+        done_exec = sum(e["execution"] for e in accepted)
+        value_rate = round(done_exec / total_exec, 4) if total_exec else 0.0
+
+        return {
+            "summary": {
+                "horizon": self._horizon,
+                "sporadic": {
+                    "total": len(sporadic),
+                    "accepted": len(accepted),
+                    "rejected": len(sporadic) - len(accepted),
+                },
+                "aperiodic": {
+                    "total": len(aperiodic),
+                    "scheduled": sum(
+                        1 for e in aperiodic if e["decision"] == "scheduled"
+                    ),
+                    "missed": sum(1 for e in aperiodic if e["missed"]),
+                },
+                "sporadic_value_rate": value_rate,
+                "reserve_after_acceptance": reserve,
+            },
+            "sporadic": sporadic,
+            "aperiodic": aperiodic,
+        }
 
     def _route(self, tick: int, job_id: str, demand: int) -> None:
         """Routes ``demand`` MWh from device spare into k[job][device] at ``tick``.

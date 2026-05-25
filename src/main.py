@@ -89,6 +89,9 @@ def run_scheduler(task_set_path: str = _TASK_SET_PATH) -> dict:
 
     JsonIO.save({"schedule_result": result["schedule_result"]}, _SCHEDULE_PATH)
     print(f"Schedule saved to {_SCHEDULE_PATH}")
+
+    JsonIO.save(result["log"], config.acceptance_test_log_path)
+    print(f"Acceptance test log saved to {config.acceptance_test_log_path}")
     return result
 
 
