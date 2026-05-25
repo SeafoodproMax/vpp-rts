@@ -7,13 +7,16 @@ class VppConfig(BaseModel):
     # Directories
     output_dir: str = "output"
     input_dir: str = "input"
-    
+    references_dir: str = "references"
+
     # Filenames
     processor_settings_filename: str = "processor_settings.json"
     task_set_filename: str = "task_set.json"
     price_filename: str = "price_72hr.json"
     schedule_result_filename: str = "schedule_result.json"
     evaluation_results_filename: str = "evaluation_results.json"
+    # Demo-provided sporadic / aperiodic jobs merged into the generated task set.
+    demo_jobs_filename: str = "aperiodic_n_sporadic_template.json"
 
     # Magic Numbers
     horizon: int = 72
@@ -38,6 +41,10 @@ class VppConfig(BaseModel):
     @property
     def evaluation_results_path(self) -> str:
         return os.path.join(self.output_dir, self.evaluation_results_filename)
+
+    @property
+    def demo_jobs_path(self) -> str:
+        return os.path.join(self.references_dir, self.demo_jobs_filename)
 
 # Global default instance
 config = VppConfig()

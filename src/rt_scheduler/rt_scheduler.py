@@ -100,7 +100,7 @@ class RTScheduler:
         # 5. Extract and format results
         extractor = SchedulerResultExtractor(formulator=formulator, eps=self._epsilon)
         result = extractor.extract_results()
-        reserve = extractor.compute_reserve()
 
-        acceptance_tester = AcceptanceTester(schedule_result=result, reserve=reserve)
+        # 6. Redirect the day-ahead reserve to sporadic / aperiodic jobs.
+        acceptance_tester = AcceptanceTester(schedule_result=result)
         return acceptance_tester.run(self._tasks)

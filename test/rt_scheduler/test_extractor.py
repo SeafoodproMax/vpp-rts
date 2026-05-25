@@ -73,18 +73,3 @@ def test_clean_rounding() -> None:
     assert extractor._clean(15.123456) == 15.1235
     assert extractor._clean(5.00001) == 5.0
     assert extractor._clean(-10.87654) == -10.8765
-
-
-def test_compute_reserve() -> None:
-    """Tests that capacity reserves are computed correctly."""
-    fake_formulator = FakeFormulator()
-    extractor = SchedulerResultExtractor(formulator=fake_formulator, eps=1e-6)  # type: ignore
-
-    reserves = extractor.compute_reserve()
-
-    # Reserve calculations:
-    # Tick 1: Supply (gen_1: 15.1235 + bat_1: 5.0 = 20.1235) - Demand (k_p1_0: 10.0) = 10.1235
-    assert reserves[1] == 10.1235
-
-    # Tick 2: Supply (gen_1: 0.0 + bat_1: 0.0 = 0.0) - Demand (0.0) = 0.0
-    assert reserves[2] == 0.0
