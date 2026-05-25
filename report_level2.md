@@ -198,8 +198,32 @@ python -c "from src.main import run_level2; run_level2()"
 
 # dynamic scheduler only, on the existing task_set.json
 python -m src.advanced_scheduler
+
+# Level 2 self-check (grades the dynamic schedule against this rubric)
+python3 -m src.validator --level 2
 ```
 
 Parameters are in `runtime_config.json`. Outputs land in `output/` with `*_dynamic`
 suffixes for the Level 2 artifacts. The renewable realisation is seeded (`seed`), so
 runs are reproducible.
+
+## Self-check coverage
+
+`python3 -m src.validator --level 2` auto-grades everything in the Level 2 rubric
+except the on-site/report-graded items, scoring the **76 auto-checkable points**:
+
+| Rubric item | Points | Auto-checked |
+|---|---|---|
+| 1 — periodic task set | 17 | yes |
+| 2 — model constraints (relaxed C13′/C16′/C18′) | 27 | yes |
+| 3 — relaxed assumptions (R1–R10, satisfied by the dynamic schedule) | 10 | yes (modelling write-up is report) |
+| 4 — acceptance (4-3 sporadic value rate) | 3 of 11 | partial (4-1/4-2 report) |
+| 5 — schedule result | 8 | yes |
+| 6 — evaluation metrics | 7 | yes |
+| 7 — reserve-strategy analysis | 10 | report-graded (SKIP) |
+| 8 — dynamic method (8-2 correctness) | 4 of 10 | partial (8-1/8-3 report) |
+
+Each relaxed constraint R1–R10 earns its point only when the dynamic schedule
+actually satisfies it (e.g. SOC follows the efficiency/self-discharge balance,
+renewable output respects the realized cap, precedence ordering holds), so the
+self-check verifies the *implementation* of item 3, not just its description.

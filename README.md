@@ -24,7 +24,15 @@ Validate the generated artifacts against the Level 1 grading rubric (items 1–3
 python3 -m src.validator
 ```
 
-Reads `output/task_set.json`, `output/schedule_result.json` and `input/processor_settings.json`, prints a per-item pass/fail report with a self-grade, and exits non-zero on any covered violation. Constraint C4 (aperiodic) is reported as `SKIP` until aperiodic handling lands.
+Reads `output/task_set.json`, `output/schedule_result.json` and `input/processor_settings.json`, prints a per-item pass/fail report with a self-grade, and exits non-zero on any covered violation.
+
+**Level 2 self-check:**
+
+```bash
+python3 -m src.validator --level 2
+```
+
+Grades the **dynamic** schedule against the full Level 2 rubric: it re-checks every Level 1 item using the *relaxed* storage/renewable constraints, scores item 3 (each relaxed constraint R1–R10, 1 pt, cap 10 — verified by the dynamic schedule actually satisfying it), and item 8-2 (dynamic schedule correctness). It reads `output/schedule_result_dynamic.json`, `output/evaluation_results_dynamic.json`, `runtime_config.json`, and `output/dynamic_run_log.json` (for the realized PV availability and precedence pairs), and prints the static-vs-dynamic comparison for report item 8-3. Report-only sub-items (4-1/4-2, 7-1/7-2 reserve analysis, 8-1, 8-3, and the item-3 modelling write-up) are `SKIP`.
 
 ## Pipeline
 
