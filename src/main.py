@@ -10,28 +10,52 @@ _TASK_SET_PATH = config.task_set_path
 _SCHEDULE_PATH = config.schedule_result_path
 
 
+def _load_demo_jobs() -> dict:
+    """Loads the demo-provided sporadic / aperiodic jobs, if the file exists.
+
+    These jobs are supplied at demo time (see Appendix I) and drive Phase 3's
+    acceptance test (rubric items 4-3 sporadic value and 2-2 aperiodic miss).
+
+    Returns:
+        A dict with ``sporadic`` and ``aperiodic`` sections (empty when the
+        demo file is absent).
+    """
+    if not os.path.exists(config.demo_jobs_path):
+        return {"sporadic": {}, "aperiodic": {}}
+    demo = JsonIO.load(config.demo_jobs_path)
+    return {
+        "sporadic": demo.get("sporadic", {}),
+        "aperiodic": demo.get("aperiodic", {}),
+    }
+
+
 def generate_task_set() -> str:
     """Phase 1: generates a periodic task set and saves it to task_set.json.
 
-    The output JSON includes empty ``sporadic`` and ``aperiodic`` sections so
-    that users can add real-time jobs before running the scheduler.  The
-    acceptance test (Phase 3) will only exercise those jobs if entries are
-    present.
+    The generated periodic tasks are merged with the demo-provided sporadic and
+    aperiodic jobs (``config.demo_jobs_path``) so the acceptance test (Phase 3)
+    has real-time jobs to accept/reject and schedule. When no demo file exists,
+    the sporadic / aperiodic sections are left empty.
 
     Returns:
         Path to the saved task set file.
     """
     generator = TaskSetGenerator(horizon=config.horizon)
     tasks_dict, frame_size = generator.generate()
+    demo_jobs = _load_demo_jobs()
     output_data = {
         "frame_size": frame_size,
         "periodic": tasks_dict,
-        "sporadic": {},
-        "aperiodic": {},
+        "sporadic": demo_jobs["sporadic"],
+        "aperiodic": demo_jobs["aperiodic"],
     }
 
     JsonIO.save(output_data, _TASK_SET_PATH)
     print(f"Generated {len(tasks_dict)} periodic tasks with frame size {frame_size}")
+    print(
+        f"Merged {len(demo_jobs['sporadic'])} sporadic and "
+        f"{len(demo_jobs['aperiodic'])} aperiodic demo jobs"
+    )
     print(f"Saved to {_TASK_SET_PATH}")
     return _TASK_SET_PATH
 

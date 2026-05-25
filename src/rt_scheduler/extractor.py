@@ -95,32 +95,3 @@ class SchedulerResultExtractor:
             )
 
         return results
-
-    def compute_reserve(self) -> dict[int, float]:
-        """Computes power grid reserve capacities per time tick.
-
-        Returns:
-            A mapping from hour tick to clean calculated reserve power.
-        """
-        reserve: dict[int, float] = {}
-
-        time_steps = self._formulator.time_steps
-        all_device_ids = self._formulator.all_device_ids
-        regular_jobs = self._formulator.regular_jobs
-
-        P = self._formulator.P
-        k = self._formulator.k
-
-        for t in time_steps:
-            total_supply = sum(
-                self._clean(pulp.value(P[i][t])) for i in all_device_ids
-            )
-            total_demand = sum(
-                self._clean(pulp.value(k[job.job_id][i][t]))
-                for job in regular_jobs
-                for i in all_device_ids
-                if t in k[job.job_id].get(i, {})
-            )
-            reserve[t] = self._clean(total_supply - total_demand)
-
-        return reserve
