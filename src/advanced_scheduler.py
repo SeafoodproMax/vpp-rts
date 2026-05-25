@@ -660,6 +660,14 @@ class AdvancedScheduler:
             "schedule_result": schedule,
             "log": self._compose_log(),
             "run_log": self._run_log,
+            # Exported so the Level 2 self-check can verify the dynamic schedule:
+            # the realized PV availability bounds renewable output per committed
+            # tick, and the precedence pairs are auto-selected at runtime.
+            "realized_renewable": {
+                rid: {str(h): round(v, 6) for h, v in series.items()}
+                for rid, series in self._actual_avail.items()
+            },
+            "precedence": [list(pair) for pair in self._relax.precedence],
         }
 
     def _log_job(

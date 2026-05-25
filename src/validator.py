@@ -1158,13 +1158,358 @@ class Level1Validator:
         )
 
 
-def _print_report(results: list[CheckResult]) -> float:
+class Level2Validator(Level1Validator):
+    """Validates Level 2 against the *dynamic* schedule and the relaxed model.
+
+    Level 2 re-uses every Level 1 rubric item (task set, model constraints,
+    acceptance test, schedule result, evaluation metrics, reserve analysis) but
+    grades them on the advanced dynamic scheduler's output, with the storage and
+    renewable constraints replaced by their relaxed forms. It then adds the two new
+    Level 2 items: item 3 (relaxed-assumption constraints, 1 pt each, cap 10) and
+    item 8 (advanced dynamic scheduling method).
+
+    Report-graded sub-items remain SKIP: 4-1/4-2 (acceptance write-up), the reserve
+    analysis, 8-1 (method design) and 8-3 (static-vs-dynamic discussion). The item 3
+    *modelling description* is report-graded too; what is auto-checked here is the
+    *implementation* — that the dynamic schedule actually satisfies each relaxation.
+    """
+
+    _RELAX_CAP = 10  # rubric item 3 caps relaxed-assumption credit at 10 points
+
+    def __init__(
+        self,
+        task_set: dict[str, Any],
+        schedule: dict[str, Any],
+        settings: dict[str, Any],
+        relaxation: dict[str, Any],
+        evaluation: dict[str, Any] | None = None,
+        realized_renewable: dict[str, Any] | None = None,
+        precedence: list[list[str]] | None = None,
+        horizon: int = _HORIZON,
+        eps: float = _EPS,
+    ) -> None:
+        """Initializes the Level 2 validator.
+
+        Args:
+            task_set: Parsed ``task_set.json``.
+            schedule: Parsed ``schedule_result_dynamic.json`` (Level 1 schema).
+            settings: Parsed ``processor_settings.json``.
+            relaxation: ``relaxation`` block from ``runtime_config.json``.
+            evaluation: Parsed ``evaluation_results_dynamic.json``, or ``None``.
+            realized_renewable: ``{renewable_id: {hour: fraction}}`` realized PV
+                availability exported in ``dynamic_run_log.json``; bounds renewable
+                output per committed tick.
+            precedence: Auto-selected/configured ``[a, b]`` job-id pairs.
+            horizon: Scheduling horizon length in ticks.
+            eps: Floating-point comparison tolerance.
+        """
+        super().__init__(task_set, schedule, settings, evaluation, horizon, eps)
+        self._relax = relaxation or {}
+        self._eta_c = float(self._relax.get("charge_efficiency", 1.0))
+        self._eta_d = float(self._relax.get("discharge_efficiency", 1.0))
+        self._sigma = float(self._relax.get("self_discharge_rate", 0.0))
+        self._cycle = self._relax.get("cycle_limit", None)
+        self._soc_floor = float(self._relax.get("soc_power_floor", 1.0))
+        self._aging = float(self._relax.get("aging_cost", 0.0))
+        self._beta = float(self._relax.get("renewable_uncertainty_margin", 0.0))
+        self._precedence = precedence or []
+        self._realized: dict[str, dict[int, float]] = {
+            rid: {int(h): float(v) for h, v in series.items()}
+            for rid, series in (realized_renewable or {}).items()
+        }
+
+    # ----------------------------------------- relaxed constraint overrides
+
+    def _c13_renewable(self) -> list[str]:
+        """C13′: renewable output respects the realized availability cap.
+
+        The dynamic schedule commits each block against the *realized* PV
+        availability (which may be above or below the forecast), so the bound is
+        ``capacity · realized``. Without an exported realized series we fall back to
+        the installed-capacity bound, which can never be a false positive.
+        """
+        bad: list[str] = []
+        for rid in self._ren_ids:
+            cap = self._ren_cap[rid]
+            realized = self._realized.get(rid)
+            fc = self._ren_forecast.get(rid, {})
+            for t in range(1, self._horizon + 1):
+                if realized is not None:
+                    limit = cap * realized.get(t, fc.get(t, 0.0))
+                else:
+                    limit = float(cap)  # installed-capacity bound
+                if self._P(rid, t) - limit > self._eps:
+                    bad.append(
+                        f"{rid}@t{t}: P {self._P(rid, t):.2f} > realized cap {limit:.2f}"
+                    )
+        return bad
+
+    def _c16_soc_balance(self) -> list[str]:
+        """C16′: SOC[t] == (1−σ)·SOC[t−1] + η_c·charge_in − (1/η_d)·discharge."""
+        bad: list[str] = []
+        for sid, b in self._sto.items():
+            prev = float(b["soc_init"])
+            for t in range(1, self._horizon + 1):
+                expected = (
+                    (1.0 - self._sigma) * prev
+                    + self._eta_c * self._charge_in(sid, t)
+                    - (1.0 / self._eta_d) * self._P(sid, t)
+                )
+                actual = self._soc(sid, t)
+                if abs(actual - expected) > self._eps:
+                    bad.append(
+                        f"{sid}@t{t}: SOC {actual:.2f} != expected {expected:.2f}"
+                    )
+                prev = actual
+        return bad
+
+    def _c18_discharge_vs_soc(self) -> list[str]:
+        """C18′: (1/η_d)·discharge ≤ (1−σ)·SOC[t−1] − soc_min."""
+        bad: list[str] = []
+        for sid, b in self._sto.items():
+            prev = float(b["soc_init"])
+            for t in range(1, self._horizon + 1):
+                drawn = (1.0 / self._eta_d) * self._P(sid, t)
+                usable_prev = (1.0 - self._sigma) * prev - b["soc_min"]
+                if drawn - usable_prev > self._eps:
+                    bad.append(
+                        f"{sid}@t{t}: drawn {drawn:.2f} > usable SOC {usable_prev:.2f}"
+                    )
+                prev = self._soc(sid, t)
+        return bad
+
+    # ----------------------------------------- new relaxed constraints (item 3)
+
+    def _r_cycle(self) -> list[str]:
+        """Throughput limit: total discharge ≤ cycle_limit · (soc_max − soc_min)."""
+        bad: list[str] = []
+        if self._cycle is None:
+            return bad
+        for sid, b in self._sto.items():
+            usable = b["soc_max"] - b["soc_min"]
+            total = sum(self._P(sid, t) for t in range(1, self._horizon + 1))
+            if total - float(self._cycle) * usable > self._eps:
+                bad.append(
+                    f"{sid}: discharge {total:.2f} > {self._cycle}×usable {self._cycle * usable:.2f}"
+                )
+        return bad
+
+    def _r_soc_power(self, charging: bool) -> list[str]:
+        """SOC-dependent power taper for discharge (or charge when ``charging``)."""
+        bad: list[str] = []
+        if self._soc_floor >= 1.0:
+            return bad
+        for sid, b in self._sto.items():
+            usable = b["soc_max"] - b["soc_min"]
+            if usable <= 0:
+                continue
+            prev = float(b["soc_init"])
+            for t in range(1, self._horizon + 1):
+                if charging:
+                    frac = self._soc_floor + (1.0 - self._soc_floor) * (
+                        (b["soc_max"] - prev) / usable
+                    )
+                    limit = b["charge_max"] * frac
+                    val = self._charge_in(sid, t)
+                    label = "charge"
+                else:
+                    frac = self._soc_floor + (1.0 - self._soc_floor) * (
+                        (prev - b["soc_min"]) / usable
+                    )
+                    limit = b["discharge_max"] * frac
+                    val = self._P(sid, t)
+                    label = "discharge"
+                if val - limit > self._eps:
+                    bad.append(f"{sid}@t{t}: {label} {val:.2f} > SOC-dep cap {limit:.2f}")
+                prev = self._soc(sid, t)
+        return bad
+
+    def _r_precedence(self) -> list[str]:
+        """Precedence: job b stays inactive until job a has run its e_a ticks."""
+        bad: list[str] = []
+        for pair in self._precedence:
+            if len(pair) != 2:
+                continue
+            a, b = pair
+            a_task = a.rsplit("_", 1)[0]
+            e_a = self._tasks.get(a_task, {}).get("e")
+            if e_a is None:
+                continue
+            a_ticks = [
+                t for t in range(1, self._horizon + 1) if self._k_job_total(a, t) > self._eps
+            ]
+            b_ticks = [
+                t for t in range(1, self._horizon + 1) if self._k_job_total(b, t) > self._eps
+            ]
+            if not b_ticks:
+                continue
+            a_before = [t for t in a_ticks if t < b_ticks[0]]
+            if len(a_before) < e_a:
+                bad.append(
+                    f"{b} active at t={b_ticks[0]} but {a} only ran "
+                    f"{len(a_before)}/{e_a} ticks before it"
+                )
+        return bad
+
+    def check_item3_relaxations(self) -> list[CheckResult]:
+        """Item 3: one point per relaxed constraint correctly implemented (cap 10).
+
+        Each relaxation that is *enabled* in ``runtime_config.json`` is awarded a
+        point when the dynamic schedule satisfies it; disabled relaxations are SKIP.
+        The relaxation modelling description itself is report-graded.
+        """
+        soc_bad = self._c16_soc_balance()
+        c18_bad = self._c18_discharge_vs_soc()
+        c13_bad = self._c13_renewable()
+        cyc_bad = self._r_cycle()
+        dis_bad = self._r_soc_power(charging=False)
+        chg_bad = self._r_soc_power(charging=True)
+        prec_bad = self._r_precedence()
+
+        renewable_realized = bool(self._realized) and any(
+            abs(self._realized[rid].get(t, 0.0) - self._ren_forecast.get(rid, {}).get(t, 0.0))
+            > 1e-3
+            for rid in self._realized
+            for t in range(1, self._horizon + 1)
+        )
+
+        def make(item: str, desc: str, active: bool, ok: bool,
+                 off_msg: str, fail: list[str]) -> CheckResult:
+            r = CheckResult(item, desc, 1)
+            if not active:
+                r.status = "SKIP"
+                r.violations.append(off_msg)
+            elif ok:
+                r.status, r.score = "PASS", 1.0
+            else:
+                r.status, r.score = "FAIL", 0.0
+                r.violations.extend(fail[:4])
+            return r
+
+        checks = [
+            make("R1", "renewable uncertainty (realized cap C13′)",
+                 self._beta > 0 or bool(self._realized),
+                 renewable_realized and not c13_bad,
+                 "renewable_uncertainty_margin=0 and no realized series",
+                 c13_bad or ["no realized series differing from forecast"]),
+            make("R2", "charge efficiency η_c (C16′)", self._eta_c < 1.0,
+                 not soc_bad, "charge_efficiency=1.0", soc_bad),
+            make("R3", "discharge efficiency η_d (C16′/C18′)", self._eta_d < 1.0,
+                 not soc_bad and not c18_bad, "discharge_efficiency=1.0",
+                 soc_bad + c18_bad),
+            make("R4", "self-discharge σ (C16′)", self._sigma > 0.0,
+                 not soc_bad, "self_discharge_rate=0", soc_bad),
+            make("R5", "discharge vs usable SOC (C18′)", self._eta_d < 1.0 or self._sigma > 0.0,
+                 not c18_bad, "no efficiency/self-discharge", c18_bad),
+            make("R6", "cycle / throughput limit", self._cycle is not None,
+                 not cyc_bad, "cycle_limit not set", cyc_bad),
+            make("R7", "SOC-dependent discharge power", self._soc_floor < 1.0,
+                 not dis_bad, "soc_power_floor=1.0", dis_bad),
+            make("R8", "SOC-dependent charge power", self._soc_floor < 1.0,
+                 not chg_bad, "soc_power_floor=1.0", chg_bad),
+            make("R9", "battery aging cost (objective)", self._aging > 0.0,
+                 True, "aging_cost=0",
+                 []),  # objective term: presence verified from config, not schedule
+            make("R10", "job precedence", bool(self._precedence),
+                 not prec_bad, "no precedence pairs", prec_bad),
+        ]
+        if self._aging > 0.0:
+            checks[8].desc += " (config-verified; objective term)"
+
+        # Cap the awarded total at 10 (rubric item 3 ceiling).
+        awarded = sum(c.score for c in checks)
+        if awarded > self._RELAX_CAP:
+            overflow = awarded - self._RELAX_CAP
+            for c in reversed(checks):
+                if overflow <= 0:
+                    break
+                if c.score > 0:
+                    cut = min(c.score, overflow)
+                    c.score -= cut
+                    overflow -= cut
+                    c.desc += " (capped)"
+        return checks
+
+    def check_item8(self, prior: list[CheckResult]) -> list[CheckResult]:
+        """Item 8: 8-1/8-3 report-graded (SKIP); 8-2 schedule correctness auto-checked."""
+        out: list[CheckResult] = []
+
+        r = CheckResult("8-1", "advanced dynamic scheduling method design", 2)
+        r.status = "SKIP"
+        r.violations.append("report-graded -- not auto-verifiable")
+        out.append(r)
+
+        # 8-2: the dynamic schedule must satisfy all model + relaxed constraints,
+        # hard deadlines, energy balance and SOC feasibility.
+        r = CheckResult("8-2", "dynamic schedule correctness", 4)
+        relevant = [
+            res for res in prior
+            if (res.item.startswith(("2-", "3-")) or res.item.startswith("R"))
+            and res.status == "FAIL"
+        ]
+        if relevant:
+            r.status, r.score = "FAIL", 0.0
+            r.violations.append(
+                "failing checks: " + ", ".join(res.item for res in relevant)
+            )
+        else:
+            r.status, r.score = "PASS", 4.0
+            r.desc += " | all model/relaxed constraints, deadlines & balance hold"
+        out.append(r)
+
+        r = CheckResult("8-3", "static-vs-dynamic comparison", 4)
+        r.status = "SKIP"
+        r.violations.append("report-graded -- see printed comparison")
+        out.append(r)
+        return out
+
+    def check_item6(self) -> list[CheckResult]:
+        """Item 7 (reserve-strategy analysis): report-graded, both sub-items SKIP."""
+        out: list[CheckResult] = []
+        for item, desc in (
+            ("7-1", "reserve-strategy algorithm description"),
+            ("7-2", "objective-function trade-off analysis"),
+        ):
+            r = CheckResult(item, desc, 5)
+            r.status = "SKIP"
+            r.violations.append("report-graded -- not auto-verifiable")
+            out.append(r)
+        return out
+
+    def validate(self) -> list[CheckResult]:
+        """Runs all Level 2 checks against the dynamic schedule and returns results.
+
+        Rubric mapping (Level 2 numbering): item 1 = task set, item 2 = model
+        constraints (relaxed), item 3 = R1..R10 relaxations, item 4 = acceptance,
+        item 5 = schedule result (the ``3-x`` rows), item 6 = evaluation (``5-x``),
+        item 7 = reserve analysis (``7-x``, SKIP), item 8 = dynamic method.
+        """
+        results: list[CheckResult] = []
+        results += self.check_item1()
+        results += self.check_item2()
+        results += self.check_item3_relaxations()
+        results += self.check_item3()   # L1 schedule-result rows -> L2 item 5
+        results += self.check_item4()
+        results += self.check_item5()    # eval rows -> L2 item 6
+        results += self.check_item6()    # reserve analysis -> L2 item 7 (SKIP)
+        results += self.check_item8(results)
+        return results
+
+
+def _print_report(
+    results: list[CheckResult],
+    title: str = "VPP-RTS Level 1 self-check",
+    skip_note: str = (
+        "SKIP rows (4-1, 4-2, 6-1, 6-2 and any check whose inputs are\n"
+        "        absent) are report-graded or not applicable; excluded above."
+    ),
+) -> float:
     """Prints a human-readable report and returns the total self-grade."""
     symbol = {"PASS": "PASS", "FAIL": "FAIL", "SKIP": "SKIP"}
     total = 0.0
     total_max = 0.0
     print("=" * 72)
-    print("  VPP-RTS Level 1 self-check")
+    print(f"  {title}")
     print("=" * 72)
     for r in results:
         if r.status != "SKIP":
@@ -1178,23 +1523,29 @@ def _print_report(results: list[CheckResult]) -> float:
             print(f"            - ... (+{len(r.violations) - 10} more)")
     print("-" * 72)
     print(f"  Self-grade (excluding SKIP): {total:.1f} / {total_max:.0f}")
-    print("  NOTE: SKIP rows (4-1, 4-2, 6-1, 6-2 and any check whose inputs are")
-    print("        absent) are report-graded or not applicable; excluded above.")
+    print(f"  NOTE: {skip_note}")
     print("=" * 72)
     return total
 
 
-def main() -> None:
-    """CLI entry point for the Level 1 self-check."""
-    parser = argparse.ArgumentParser(description="VPP-RTS Level 1 self-validator")
-    parser.add_argument("--task-set", default="output/task_set.json")
-    parser.add_argument("--schedule", default="output/schedule_result.json")
-    parser.add_argument("--settings", default="input/processor_settings.json")
-    parser.add_argument("--evaluation", default="output/evaluation_results.json")
-    parser.add_argument("--horizon", type=int, default=_HORIZON)
-    parser.add_argument("--eps", type=float, default=_EPS)
-    args = parser.parse_args()
+def _print_comparison(static_eval: dict[str, Any], dynamic_eval: dict[str, Any]) -> None:
+    """Prints the static-vs-dynamic metric comparison (informational, item 8-3)."""
+    keys = [
+        "objective_value", "generator_cost", "market_revenue",
+        "hard_deadline_miss_rate", "soft_deadline_miss_rate",
+        "average_response_time",
+    ]
+    print("\n  Static (L1) vs dynamic (L2) — informational for report item 8-3:")
+    print(f"    {'metric':28} {'static':>14} {'dynamic':>14}")
+    for k in keys:
+        print(f"    {k:28} {static_eval.get(k, 0):>14} {dynamic_eval.get(k, 0):>14}")
+    sv_s = static_eval.get("acceptance_test", {}).get("sporadic_value_rate", 0)
+    sv_d = dynamic_eval.get("acceptance_test", {}).get("sporadic_value_rate", 0)
+    print(f"    {'sporadic_value_rate':28} {sv_s:>14} {sv_d:>14}")
 
+
+def _run_level1(args: argparse.Namespace) -> list[CheckResult]:
+    """Builds and runs the Level 1 validator, returning the check results."""
     validator = Level1Validator(
         task_set=_load_json(args.task_set),
         schedule=_load_json(args.schedule),
@@ -1205,6 +1556,70 @@ def main() -> None:
     )
     results = validator.validate()
     _print_report(results)
+    return results
+
+
+def _run_level2(args: argparse.Namespace) -> list[CheckResult]:
+    """Builds and runs the Level 2 validator against the dynamic artifacts."""
+    runtime = _load_json_optional(args.runtime_config) or {}
+    run_log = _load_json_optional(args.run_log) or {}
+
+    validator = Level2Validator(
+        task_set=_load_json(args.task_set),
+        schedule=_load_json(args.schedule),
+        settings=_load_json(args.settings),
+        relaxation=runtime.get("relaxation", {}),
+        evaluation=_load_json_optional(args.evaluation),
+        realized_renewable=run_log.get("realized_renewable"),
+        precedence=run_log.get("precedence"),
+        horizon=args.horizon,
+        eps=args.eps,
+    )
+    results = validator.validate()
+    _print_report(
+        results,
+        title="VPP-RTS Level 2 self-check (dynamic schedule)",
+        skip_note=(
+            "SKIP rows (4-1, 4-2, 7-1, 7-2, 8-1, 8-3, the item 3 modelling\n"
+            "        write-up, and any check with absent inputs) are report-graded\n"
+            "        or not applicable; excluded above."
+        ),
+    )
+    static_eval = _load_json_optional(args.static_evaluation)
+    dynamic_eval = _load_json_optional(args.evaluation)
+    if static_eval and dynamic_eval:
+        _print_comparison(static_eval, dynamic_eval)
+    return results
+
+
+def main() -> None:
+    """CLI entry point for the self-check (Level 1 by default, ``--level 2``)."""
+    parser = argparse.ArgumentParser(description="VPP-RTS self-validator")
+    parser.add_argument("--level", type=int, choices=(1, 2), default=1)
+    parser.add_argument("--task-set", default="output/task_set.json")
+    parser.add_argument("--schedule", default=None,
+                        help="defaults to schedule_result.json (L1) / "
+                             "schedule_result_dynamic.json (L2)")
+    parser.add_argument("--settings", default="input/processor_settings.json")
+    parser.add_argument("--evaluation", default=None,
+                        help="defaults to evaluation_results.json (L1) / "
+                             "evaluation_results_dynamic.json (L2)")
+    parser.add_argument("--runtime-config", default="runtime_config.json")
+    parser.add_argument("--run-log", default="output/dynamic_run_log.json")
+    parser.add_argument("--static-evaluation", default="output/evaluation_results.json")
+    parser.add_argument("--horizon", type=int, default=_HORIZON)
+    parser.add_argument("--eps", type=float, default=_EPS)
+    args = parser.parse_args()
+
+    if args.level == 2:
+        args.schedule = args.schedule or "output/schedule_result_dynamic.json"
+        args.evaluation = args.evaluation or "output/evaluation_results_dynamic.json"
+        results = _run_level2(args)
+    else:
+        args.schedule = args.schedule or "output/schedule_result.json"
+        args.evaluation = args.evaluation or "output/evaluation_results.json"
+        results = _run_level1(args)
+
     # Non-zero exit if any covered constraint is violated, for CI use.
     failed = any(r.status == "FAIL" for r in results)
     raise SystemExit(1 if failed else 0)

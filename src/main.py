@@ -165,7 +165,14 @@ def run_advanced_scheduler(task_set_path: str = _TASK_SET_PATH) -> dict:
 
     JsonIO.save({"schedule_result": result["schedule_result"]}, config.schedule_result_dynamic_path)
     JsonIO.save(result["log"], config.acceptance_test_log_dynamic_path)
-    JsonIO.save({"run_log": result["run_log"]}, config.dynamic_run_log_path)
+    JsonIO.save(
+        {
+            "run_log": result["run_log"],
+            "realized_renewable": result["realized_renewable"],
+            "precedence": result["precedence"],
+        },
+        config.dynamic_run_log_path,
+    )
     print(f"Dynamic schedule saved to {config.schedule_result_dynamic_path}")
 
     evaluator = Evaluator(
