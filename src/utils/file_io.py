@@ -9,6 +9,19 @@ class JsonIO:
     """Utility class for JSON file operations."""
 
     @staticmethod
+    def load(filepath: str) -> Any:
+        """Loads and returns parsed JSON data from a file.
+
+        Args:
+            filepath: The source file path.
+
+        Returns:
+            The parsed JSON object.
+        """
+        with open(filepath, "r", encoding="utf-8") as f:
+            return json.load(f)
+
+    @staticmethod
     def save(data: Any, filepath: str) -> None:
         """Saves data to a JSON file, creating parent directories if needed.
 

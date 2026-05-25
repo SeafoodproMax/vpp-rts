@@ -1,14 +1,19 @@
 # vpp-rts
 
-NCKU Real-Time Systems homework — generates a valid periodic task set for a Virtual Power Plant (VPP) cyclic executive scheduler.
+NCKU Real-Time Systems homework — a Virtual Power Plant (VPP) real-time scheduling system that generates a periodic task set, solves a day-ahead MILP schedule, runs an acceptance test for sporadic/aperiodic jobs, and evaluates the result.
 
 ## Quick start
 
-> Requires [Python 3.12+](https://www.python.org/downloads/release/python-3120/) and [Poetry](https://python-poetry.org/).
-
+**With Poetry (recommended):**
 ```bash
 poetry install
 poetry run main
+```
+
+**Without Poetry:**
+```bash
+pip install pulp pydantic
+python -m src.main
 ```
 
 ## Self-check (Level 1)
@@ -21,9 +26,36 @@ python3 -m src.validator
 
 Reads `output/task_set.json`, `output/schedule_result.json` and `input/processor_settings.json`, prints a per-item pass/fail report with a self-grade, and exits non-zero on any covered violation. Constraint C4 (aperiodic) is reported as `SKIP` until aperiodic handling lands.
 
-## What it does
+## Pipeline
 
-Randomly generates 6–10 periodic tasks that satisfy the following constraints for a 72-unit hyperperiod:
+The full pipeline runs four phases in sequence:
+
+```
+Phase 1 — Task Generation
+  → output/task_set.json   (periodic tasks; add sporadic/aperiodic entries manually)
+
+Phase 2 — Day-Ahead Scheduling (MILP)
+  ← input/processor_settings.json
+  ← input/price_72hr.json
+  ← output/task_set.json
+  → output/schedule_result.json
+
+Phase 3 — Acceptance Test  (integrated into RTScheduler.run())
+  ← reserve computed by Phase 2 solver
+  ← output/task_set.json   (sporadic / aperiodic tasks)
+  → output/schedule_result.json  (annotated with rejected_sporadic / missed_aperiodic)
+
+Phase 4 — Evaluation
+  ← input/processor_settings.json
+  ← input/price_72hr.json
+  ← output/task_set.json
+  ← output/schedule_result.json
+  → output/evaluation_results.json
+```
+
+### Phase 1 — Task Generation
+
+Randomly generates 6–10 periodic tasks satisfying all assignment constraints for a 72-unit hyperperiod:
 
 | Constraint | Rule |
 |---|---|
@@ -39,19 +71,31 @@ Each task has the following fields:
 | `r` | Release time |
 | `p` | Period |
 | `e` | Execution time (WCET) |
-| `d` | Deadline |
-| `w` | Energy demand |
+| `d` | Relative deadline |
+| `w` | Energy demand (MWh/h) |
 | `preempt` | `1` = preemptible, `0` = non-preemptive |
 
-Output is written to `output/task_set.json`.
+The output `task_set.json` also includes empty `sporadic` and `aperiodic` sections. Add entries there before running Phase 2 to exercise the acceptance test.
 
-## Scheduling and acceptance tests
+### Phase 2 — Day-Ahead Scheduling
 
-After task generation, `RTScheduler` runs a PuLP-based day-ahead MILP scheduler for
-the 72-hour horizon. It expands periodic tasks into concrete jobs, schedules VPP
-generation/storage/renewable output, and computes the remaining reserve per tick.
+Expands periodic tasks into concrete jobs over the 72-hour horizon and solves a PuLP MILP problem with 23 constraints covering:
 
-Phase 3 then runs `AcceptanceTester` on that reserve:
+- Job execution completeness and ordering
+- Generator ramp-up/down, min up/down time, output limits
+- Renewable forecast limits
+- Storage SOC, charge/discharge limits, no simultaneous charge+discharge
+- Energy balance per time step
+- Market sell quantity
+
+**Objective:** minimise `α·f1 + f2 + f3`
+- `f1` = aperiodic deadline miss count (α = 10,000 $/miss)
+- `f2` = Σ (cost\_fixed · min(1, P) + cost\_variable · P) for generators
+- `f3` = −Σ (λ_t · Sell_t) (market revenue, negated for minimisation)
+
+### Phase 3 — Acceptance Test
+
+Processes sporadic (hard-deadline) and aperiodic (soft-deadline) jobs using the reserve left by the MILP solver. **Implemented in `AcceptanceTester` and automatically called inside `RTScheduler.run()`.**
 
 | Task type | Rule |
 |---|---|
@@ -60,32 +104,69 @@ Phase 3 then runs `AcceptanceTester` on that reserve:
 | `preempt = 1` | May use non-contiguous slots. |
 | `preempt = 0` | Must use one contiguous execution window. |
 
-Accepted/scheduled jobs consume reserve by `w` for each of their `e` execution
-ticks. Schedule records may include `accepted_sporadic` and
-`scheduled_aperiodic` annotations in addition to the original
-`rejected_sporadic` and `missed_aperiodic` fields.
+Accepted/scheduled jobs consume reserve by `w` for each of their `e` execution ticks. To exercise this phase, add sporadic/aperiodic entries to `output/task_set.json` before running Phase 2.
+
+### Phase 4 — Evaluation
+
+Reads the solved schedule and computes all required performance metrics:
+
+| Metric | Formula |
+|---|---|
+| `hard_deadline_miss_rate` | missed periodic + sporadic jobs / total |
+| `soft_deadline_miss_rate` | missed aperiodic jobs / total |
+| `average_tardiness` | avg max(0, C_j − d_j) |
+| `max_tardiness` | max max(0, C_j − d_j) |
+| `average_response_time` | avg (C_j − r_j) |
+| `max_response_time` | max (C_j − r_j) |
+| `completion_time_jitter` | avg peak-to-peak of C across instances of same task |
+| `sporadic_value_rate` | exec time completed before deadline / total exec time |
+| `generator_cost` | f2 from objective |
+| `market_revenue` | Σ (λ_t · Sell_t) |
+| `objective_value` | α·f1 + f2 − market\_revenue |
 
 ## Project structure
 
 ```
 src/
-├── main.py                  # Entry point
-├── validator.py             # Level 1 self-check (stdlib only)
-├── generator/
-│   ├── task_set_generator.py    # Random task generation
-│   ├── frame_size_calculator.py # Frame size search
-│   └── task_set_validator.py    # Constraint validation
-├── model/                   # Pydantic data models
-│   ├── task/                # RT task types
-│   ├── asset/               # VPP physical assets
-│   └── market/              # Electricity price data
+├── main.py                      # Pipeline entry point
+├── config.py                    # Centralised paths and constants
+├── validator.py                 # Level 1 self-check (stdlib only)
+├── generator/                   # Phase 1: task set generation
+│   ├── task_set_generator.py
+│   ├── frame_size_calculator.py
+│   └── task_set_validator.py
+├── rt_scheduler/                # Phase 2 + 3: MILP scheduler + acceptance test
+│   ├── rt_scheduler.py          # Orchestrator (calls AcceptanceTester at end)
+│   ├── acceptance_tester.py     # Sporadic/aperiodic scheduling on reserve
+│   ├── expander.py              # Expands tasks → concrete jobs
+│   ├── formulator.py            # Builds PuLP problem (23 constraints)
+│   └── extractor.py             # Parses solved variables → JSON + reserve
+├── evaluator/                   # Phase 4: performance metrics
+│   └── evaluator.py
+├── model/                       # Pydantic data models
+│   ├── base/base_model.py
+│   ├── asset/                   # Generator, Storage, Renewable, ChargingJob
+│   ├── task/                    # PeriodicTask, SporadicTask, AperiodicTask, ExpandedJob
+│   └── market/                  # PriceSystem, PriceRecord
 └── utils/
-    └── file_io.py           # JSON read/write helpers
+    └── file_io.py               # JsonIO.load() / JsonIO.save()
 
 input/
-├── processor_settings.json  # VPP asset configuration
-└── price_72hr.json          # 72-hour market price data
+├── processor_settings.json      # VPP asset configuration
+└── price_72hr.json              # 72-hour market price forecast
 
-output/
-└── task_set.json            # Generated task set (git-ignored)
+output/                          # git-ignored, generated at runtime
+├── task_set.json
+├── schedule_result.json
+└── evaluation_results.json
+```
+
+## Running tests
+
+```bash
+# With Poetry
+poetry run pytest
+
+# Without Poetry
+python -m pytest
 ```
