@@ -30,6 +30,7 @@ introduced anywhere in Level 2.
 """
 
 import random
+import time
 from typing import Any
 
 import pulp
@@ -68,9 +69,10 @@ class AdvancedScheduler:
         max_reserve_per_tick: float = 120.0,
         max_solves: int = 80,
         max_deviation_triggers: int = 3,
-        gap_rel: float = 0.05,
+        gap_rel: float = 0.20,
         time_limit: int = 20,
         threads: int = 1,
+        verbose: bool = False,
         assets: ProcessorSettingsSystem | None = None,
         tasks: TaskSystem | None = None,
         prices: PriceSystem | None = None,
@@ -93,6 +95,9 @@ class AdvancedScheduler:
             seed: RNG seed for reproducible renewable realization.
             max_reserve_per_tick: Cap on the per-tick reservation floor (MWh).
             max_solves: Safety cap on the number of MILP solves.
+            verbose: When True, prints a per-round progress line so the dynamic
+                phase reports progress instead of appearing to hang during its
+                several MILP solves.
             assets: Optional pre-loaded assets aggregate (dependency injection).
             tasks: Optional pre-loaded task aggregate (dependency injection).
             prices: Optional pre-loaded price aggregate (dependency injection).
@@ -113,6 +118,7 @@ class AdvancedScheduler:
         self._gap_rel = gap_rel
         self._time_limit = time_limit
         self._threads = threads
+        self._verbose = verbose
 
         self._assets = assets
         self._tasks = tasks
@@ -162,9 +168,13 @@ class AdvancedScheduler:
         self._build_actual_renewable()
 
         boundaries = self._trigger_ticks()
+        if self._verbose:
+            print(
+                f"Dynamic re-optimization (rolling horizon, {len(boundaries)} rounds)..."
+            )
         for idx, t0 in enumerate(boundaries):
             t1 = boundaries[idx + 1] if idx + 1 < len(boundaries) else self._horizon + 1
-            self._run_round(t0, t1)
+            self._run_round(t0, t1, idx + 1, len(boundaries))
 
         return self._finalize()
 
@@ -262,21 +272,38 @@ class AdvancedScheduler:
 
     # ----------------------------------------------------------------- a round
 
-    def _run_round(self, t0: int, t1: int) -> None:
-        """Executes one re-optimization round committing block ``[t0, t1)``."""
+    def _run_round(
+        self, t0: int, t1: int, round_idx: int = 0, round_total: int = 0
+    ) -> None:
+        """Executes one re-optimization round committing block ``[t0, t1)``.
+
+        Args:
+            t0: Trigger tick; the pin boundary and start of the committed block.
+            t1: Reveal boundary; the committed block is ``[t0, t1)``.
+            round_idx: 1-based index of this round, for progress reporting.
+            round_total: Total number of rounds, for progress reporting.
+        """
+        started = time.perf_counter()
         revealed = self._reveal_jobs(t1)
         formulator, rejected = self._admit_and_solve(revealed, t0, t1)
         self._capture_block(formulator, t0, t1)
         routed = self._route_accepted(t0, t1)
+
+        admitted = sorted(jid for jid in self._accepted if jid not in rejected)
+        if self._verbose:
+            print(
+                f"  round {round_idx}/{round_total} @ tick {t0}: "
+                f"committed [{t0},{t1 - 1}], revealed {len(revealed)}, "
+                f"admitted {len(admitted)}, rejected {len(rejected)} "
+                f"({time.perf_counter() - started:.1f}s)"
+            )
 
         self._run_log.append(
             {
                 "trigger_tick": t0,
                 "committed_range": [t0, t1 - 1],
                 "revealed": [j.task_id for j in revealed],
-                "admitted": sorted(
-                    jid for jid in self._accepted if jid not in rejected
-                ),
+                "admitted": admitted,
                 "rejected": sorted(rejected),
                 "routed_jobs": routed,
                 "reserve_floor_total": round(
