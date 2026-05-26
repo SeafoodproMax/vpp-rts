@@ -42,7 +42,7 @@ def generate_task_set() -> str:
     Returns:
         Path to the saved task set file.
     """
-    generator = TaskSetGenerator(horizon=config.horizon)
+    generator = TaskSetGenerator(horizon=config.horizon, seed=config.task_seed)
     tasks_dict, frame_size = generator.generate()
     demo_jobs = _load_demo_jobs()
     output_data = {
