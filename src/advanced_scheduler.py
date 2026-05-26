@@ -70,7 +70,7 @@ class AdvancedScheduler:
         max_deviation_triggers: int = 3,
         gap_rel: float = 0.05,
         time_limit: int = 20,
-        threads: int = 4,
+        threads: int = 1,
         assets: ProcessorSettingsSystem | None = None,
         tasks: TaskSystem | None = None,
         prices: PriceSystem | None = None,
@@ -444,12 +444,18 @@ class AdvancedScheduler:
             # the gap-suboptimal solve), which a 1e-6 band would reject as
             # infeasible. 1e-3 MWh is physically negligible at the schedule scale.
             formulator.pin_prefix(self._raw, upto_tick, tol=1e-3)
+        # Always solve single-threaded. CBC's multi-threaded mode hangs on Windows
+        # when a time limit is set (the worker never terminates and timeLimit never
+        # fires, so run_level2() / `python -m src.advanced_scheduler` never finish).
+        # Single-threaded also makes each solve deterministic, so the dynamic
+        # schedule is fully reproducible across runs and platforms. ``self._threads``
+        # is capped to 1 here regardless of the configured value.
         formulator.prob.solve(
             pulp.PULP_CBC_CMD(
                 msg=0,
                 gapRel=self._gap_rel,
                 timeLimit=self._time_limit,
-                threads=self._threads,
+                threads=1,
             )
         )
         # A MIP gap / time limit is used for tractable online re-optimization; CBC
