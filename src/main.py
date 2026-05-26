@@ -159,6 +159,7 @@ def run_advanced_scheduler(task_set_path: str = _TASK_SET_PATH) -> dict:
         horizon=config.horizon,
         epsilon=config.epsilon,
         relaxation=relaxation,
+        verbose=True,
         **dynamic,
     )
     result = scheduler.run()
