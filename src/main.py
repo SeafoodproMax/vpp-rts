@@ -164,7 +164,11 @@ def run_advanced_scheduler(task_set_path: str = _TASK_SET_PATH) -> dict:
     result = scheduler.run()
 
     JsonIO.save({"schedule_result": result["schedule_result"]}, config.schedule_result_dynamic_path)
+    print(f"Dynamic schedule saved to {config.schedule_result_dynamic_path}")
+
     JsonIO.save(result["log"], config.acceptance_test_log_dynamic_path)
+    print(f"Dynamic acceptance test log saved to {config.acceptance_test_log_dynamic_path}")
+
     JsonIO.save(
         {
             "run_log": result["run_log"],
@@ -173,7 +177,7 @@ def run_advanced_scheduler(task_set_path: str = _TASK_SET_PATH) -> dict:
         },
         config.dynamic_run_log_path,
     )
-    print(f"Dynamic schedule saved to {config.schedule_result_dynamic_path}")
+    print(f"Dynamic run log saved to {config.dynamic_run_log_path}")
 
     evaluator = Evaluator(
         processor_settings_path=config.processor_settings_path,
