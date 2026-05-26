@@ -11,10 +11,26 @@ from src.generator.task_set_validator import TaskSetValidator
 class TaskSetGenerator:
     """Generates sets of periodic tasks satisfying specific constraints."""
 
-    def __init__(self, horizon: int, validator: Optional[TaskSetValidator] = None) -> None:
-        """Initializes the TaskSetGenerator with a calculator and validator."""
+    def __init__(
+        self,
+        horizon: int,
+        validator: Optional[TaskSetValidator] = None,
+        seed: Optional[int] = None,
+    ) -> None:
+        """Initializes the TaskSetGenerator with a calculator and validator.
+
+        Args:
+            horizon: The planning horizon duration.
+            validator: Task-set validator (defaults to a fresh ``TaskSetValidator``).
+            seed: Optional RNG seed. When given, generation is fully deterministic,
+                so the same task set is produced on every run (and across machines /
+                Python versions). ``None`` draws a fresh random task set each run.
+        """
         self._calculator = FrameSizeCalculator(horizon=horizon)
         self._validator = validator or TaskSetValidator(horizon=horizon)
+        # Own RNG instance so seeding does not perturb global random state used
+        # elsewhere (e.g. AdvancedScheduler's renewable realization).
+        self._rng = random.Random(seed)
 
     def generate(self) -> Tuple[Dict[str, dict], int]:
         """Generates a valid dictionary of tasks and the corresponding frame size.
@@ -27,7 +43,7 @@ class TaskSetGenerator:
             if len(periods) < 3:
                 continue
 
-            random.shuffle(tasks_list)
+            self._rng.shuffle(tasks_list)
             tasks_dict = {f"p{i+1}": t for i, t in enumerate(tasks_list)}
 
             frame_size = self._calculator.find_frame_size(tasks_dict)
@@ -38,15 +54,15 @@ class TaskSetGenerator:
 
     def _generate_candidate(self) -> Tuple[List[dict], Set[int]]:
         """Generates a candidate list of tasks and their periods."""
-        num_tasks = random.randint(6, 10)
+        num_tasks = self._rng.randint(6, 10)
         num_d_eq_e = math.ceil(num_tasks * 0.2)
-        
+
         tasks: List[dict] = []
         periods: Set[int] = set()
 
         tasks.extend(self._generate_deadline_eq_exec_tasks(num_d_eq_e, periods))
         tasks.extend(self._generate_non_preemptive_tasks(periods))
-        
+
         remaining_count = num_tasks - len(tasks)
         tasks.extend(self._generate_remaining_tasks(remaining_count, periods))
 
@@ -58,14 +74,14 @@ class TaskSetGenerator:
         """Generates tasks where deadline equals execution time."""
         tasks = []
         for _ in range(count):
-            p = random.choice([8, 12, 16, 20, 24])
+            p = self._rng.choice([8, 12, 16, 20, 24])
             tasks.append({
-                "r": random.randint(1, p),
+                "r": self._rng.randint(1, p),
                 "p": p,
                 "e": 4,
                 "d": 4,
-                "w": random.randint(6, 18),
-                "preempt": random.choice([0, 1]),
+                "w": self._rng.randint(6, 18),
+                "preempt": self._rng.choice([0, 1]),
             })
             periods.add(p)
         return tasks
@@ -74,15 +90,15 @@ class TaskSetGenerator:
         """Generates two specific non-preemptive tasks to satisfy constraints."""
         tasks = []
         for _ in range(2):
-            p = random.randint(6, 24)
+            p = self._rng.randint(6, 24)
             min_d = max(2, 8 - math.gcd(4, p))
-            d = random.randint(min_d, p)
+            d = self._rng.randint(min_d, p)
             tasks.append({
-                "r": random.randint(1, p),
+                "r": self._rng.randint(1, p),
                 "p": p,
                 "e": 2,
                 "d": d,
-                "w": random.randint(14, 18),
+                "w": self._rng.randint(14, 18),
                 "preempt": 0,
             })
             periods.add(p)
@@ -94,17 +110,17 @@ class TaskSetGenerator:
         """Generates the remaining required tasks with loose constraints."""
         tasks = []
         for _ in range(count):
-            e = random.randint(1, 3)
-            p = random.randint(6, 24)
+            e = self._rng.randint(1, 3)
+            p = self._rng.randint(6, 24)
             min_d = max(e, 8 - math.gcd(4, p))
-            d = random.randint(min_d, p)
+            d = self._rng.randint(min_d, p)
             tasks.append({
-                "r": random.randint(1, p),
+                "r": self._rng.randint(1, p),
                 "p": p,
                 "e": e,
                 "d": d,
-                "w": random.randint(6, 18),
-                "preempt": random.choice([0, 1]),
+                "w": self._rng.randint(6, 18),
+                "preempt": self._rng.choice([0, 1]),
             })
             periods.add(p)
         return tasks

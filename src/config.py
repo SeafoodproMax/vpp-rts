@@ -29,6 +29,10 @@ class VppConfig(BaseModel):
     # Magic Numbers
     horizon: int = 72
     epsilon: float = 1e-6
+    # Seed for the periodic task-set generator. A fixed seed makes Phase 1
+    # deterministic so the schedule/evaluation/report stay reproducible; set to
+    # None to draw a fresh random task set on every run.
+    task_seed: int = 20260526
     
     @property
     def processor_settings_path(self) -> str:

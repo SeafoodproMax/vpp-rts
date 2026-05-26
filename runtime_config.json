@@ -19,6 +19,6 @@
         "max_deviation_triggers": 3,
         "gap_rel": 0.05,
         "time_limit": 20,
-        "threads": 4
+        "threads": 1
     }
 }
