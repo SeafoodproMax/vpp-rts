@@ -146,7 +146,7 @@ On the reference run (9 rounds / 9 MILP solves, ~15 s):
 - **Online arrival handled.** Jobs are revealed and admitted as they arrive over the
   horizon — e.g. `s1,a1,a2` at t0=2, `s2,a3` at t0=14, `s3,a5` at t0=28, … `s6,a10`
   at t0=66 (see `dynamic_run_log.json`).
-- **All hard deadlines met.** All 49 periodic jobs and all 6 sporadic jobs complete
+- **All hard deadlines met.** All 34 periodic jobs and all 6 sporadic jobs complete
   before their absolute deadlines; `hard_deadline_miss_rate = 0.0`.
 - **All soft jobs scheduled.** All 10 aperiodic jobs complete by their soft deadline;
   `soft_deadline_miss_rate = 0.0`, `sporadic_value_rate = 1.0`.
@@ -160,18 +160,20 @@ On the reference run (9 rounds / 9 MILP solves, ~15 s):
 
 ### 8-3 Static (Level 1) vs dynamic (Level 2) comparison
 
-Both methods run on the *same* `task_set.json` (9 periodic tasks → 49 jobs, 6 sporadic,
+Both methods run on the *same* `task_set.json` (9 periodic tasks → 34 jobs, 6 sporadic,
 10 aperiodic). Reference numbers (`evaluation_results.json` vs
 `evaluation_results_dynamic.json`):
 
 | Metric | Static (L1) | Dynamic (L2) | Δ |
 |---|---|---|---|
-| objective_value | −39 344.8 | **−52 329.1** | −12 984 (better) |
-| generator_cost | 292 020 | 303 280 | +11 260 |
-| market_revenue | 351 365 | 355 609 | +4 244 |
+| objective_value | −72 475.6 | **−88 505.4** | −16 029.8 (better) |
+| generator_cost | 296 580 | 305 700 | +9 120 |
+| market_revenue | 389 055.6 | 394 205.4 | +5 149.8 |
 | hard_deadline_miss_rate | 0.0 | 0.0 | — |
 | **soft_deadline_miss_rate** | **0.2** | **0.0** | −0.2 |
-| average_response_time | 3.52 | 3.00 | −0.52 |
+| average_tardiness | 0.16 | 0.0 | −0.16 |
+| max_tardiness | 4 | 0 | −4 |
+| average_response_time | 4.90 | 4.36 | −0.54 |
 | sporadic_value_rate | 1.0 | 1.0 | — |
 
 **Interpretation.**
@@ -179,12 +181,12 @@ Both methods run on the *same* `task_set.json` (9 periodic tasks → 49 jobs, 6 
 - The static day-ahead plan, knowing all jobs at once but committing to a single
   schedule, **misses 2 of 10 aperiodic jobs** (soft miss rate 0.2). The dynamic method
   re-optimizes as jobs arrive and *reserves* capacity for them, so it **schedules all
-  10 on time** (soft miss rate 0.0) and lowers average response time 3.52 → 3.00.
+  10 on time** (soft miss rate 0.0) and lowers average response time 4.90 → 4.36.
 - Eliminating 2 soft misses removes `2 × α = 20 000` of penalty (α = 10 000/miss),
-  which dominates the objective: dynamic objective −52 329 vs static −39 345.
+  which dominates the objective: dynamic objective −88 505 vs static −72 476.
 - The trade-off is visible: holding reserve and compensating for realised renewable
-  shortfalls **raises generator cost (+11 260)**; the larger committed generation also
-  raises market revenue slightly (+4 244). Net of the miss penalty, the dynamic method
+  shortfalls **raises generator cost (+9 120)**; the larger committed generation also
+  raises market revenue slightly (+5 150). Net of the miss penalty, the dynamic method
   is clearly better on the total objective, confirming the 8-1 analysis that improving
   acceptance/miss costs generator fuel.
 
