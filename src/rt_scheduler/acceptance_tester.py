@@ -312,14 +312,31 @@ class AcceptanceTester:
         )
 
     def _compose_log(self, reserve: dict[int, float]) -> dict[str, Any]:
-        """Assembles the acceptance-test log with a summary and per-job records.
+        """Assembles the acceptance-test log in the format required by the grader.
+
+        The top-level ``acceptance_test_log`` array is a flat list combining all
+        sporadic and aperiodic decisions, using the field names mandated by the
+        demo grading script:
+
+            job_id        – task identifier
+            type          – "sporadic" or "aperiodic"
+            release_time  – absolute release tick
+            abs_deadline  – absolute deadline tick (hard for sporadic, soft for
+                            aperiodic)
+            execution_time – number of slots required
+            energy_demand  – MWh required per slot
+            assigned_hours – list of ticks actually scheduled ([] if rejected/missed)
+            accepted       – true when slots were allocated; false otherwise
+
+        A ``summary`` block and the original per-job detail lists are retained
+        alongside for evaluation and rubric items 4-1 / 4-2.
 
         Args:
             reserve: Leftover redirectable reserve per tick after allocation.
 
         Returns:
-            A serializable log with a ``summary`` block plus the ``sporadic`` and
-            ``aperiodic`` decision lists gathered during the run.
+            A serializable log dict containing ``acceptance_test_log``,
+            ``summary``, ``sporadic``, and ``aperiodic`` sections.
         """
         sporadic = self._log["sporadic"]
         aperiodic = self._log["aperiodic"]
@@ -328,7 +345,36 @@ class AcceptanceTester:
         done_exec = sum(e["execution"] for e in accepted)
         value_rate = round(done_exec / total_exec, 4) if total_exec else 0.0
 
+        # ── 助教規定的統一格式（扁平陣列，sporadic + aperiodic 合併） ──────────
+        acceptance_test_log: list[dict[str, Any]] = []
+        for entry in sporadic:
+            acceptance_test_log.append({
+                "job_id": entry["task_id"],
+                "type": "sporadic",
+                "release_time": entry["release"],
+                "abs_deadline": entry["absolute_deadline"],
+                "execution_time": entry["execution"],
+                "energy_demand": entry["demand"],
+                "assigned_hours": entry.get("scheduled_slots", []),
+                "accepted": entry["decision"] == "accepted",
+            })
+        for entry in aperiodic:
+            acceptance_test_log.append({
+                "job_id": entry["task_id"],
+                "type": "aperiodic",
+                "release_time": entry["release"],
+                "abs_deadline": entry["soft_deadline"],
+                "execution_time": entry["execution"],
+                "energy_demand": entry["demand"],
+                "assigned_hours": entry.get("scheduled_slots", []),
+                # aperiodic：有取得排程槽即視為 accepted（即使超過軟 deadline）
+                "accepted": bool(entry.get("scheduled_slots")),
+            })
+
         return {
+            # 助教要求的頂層格式
+            "acceptance_test_log": acceptance_test_log,
+            # 以下保留供內部評估與 4-1/4-2 評分項目使用
             "summary": {
                 "horizon": self._horizon,
                 "sporadic": {

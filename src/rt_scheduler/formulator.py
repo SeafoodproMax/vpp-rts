@@ -182,13 +182,18 @@ class VppMilpFormulator:
         """Declares all decision variables for the MILP solver."""
         T = self._time_steps
 
-        # P[i][t]: Device output
+        # ── 連續變數 ────────────────────────────────────────────────────────────
+
+        # P[i][t]：裝置 i 在 t 時刻的總輸出功率（MWh），≥ 0
+        # 包含發電機、再生能源、儲能（放電為正）
         for i in self._all_device_ids:
             self._P[i] = {
                 t: pulp.LpVariable(f"P_{i}_{t}", lowBound=0) for t in T
             }
 
-        # k[job][device][t]: Energy routing
+        # k[job][device][t]：job j 在 t 時刻從裝置 i 取用的電量（MWh）
+        # 只在 job 的 [release, deadline] 區間內定義
+        # 充電 job 只能從 gen/renewable 取電（不含儲能放電）
         for job in self._all_jobs:
             self._k[job.job_id] = {}
             allowed_devices = (
@@ -201,7 +206,11 @@ class VppMilpFormulator:
                         f"k_{job.job_id}_{i}_{t}", lowBound=0
                     )
 
-        # Generator on/off/start/stop binaries
+        # ── 整數變數（Binary）───────────────────────────────────────────────────
+
+        # u[i][t]：發電機 i 在 t 時刻是否開機（1=開, 0=關）
+        # start[i][t]：t 時刻是否啟動（0→1 的轉變）
+        # stop[i][t]：t 時刻是否關機（1→0 的轉變）
         for i in self._gen_ids:
             self._u[i] = {
                 t: pulp.LpVariable(f"u_{i}_{t}", cat="Binary") for t in T
@@ -213,7 +222,10 @@ class VppMilpFormulator:
                 t: pulp.LpVariable(f"stop_{i}_{t}", cat="Binary") for t in T
             }
 
-        # Storage charge/discharge binaries & SOC continuous variables
+        # charge_b[i][t]：儲能 i 在 t 時刻是否正在充電
+        # discharge_b[i][t]：儲能 i 在 t 時刻是否正在放電
+        # SOC[i][t]：儲能 i 在 t 時刻的剩餘電量（State of Charge），連續變數
+        #   上下界 = [soc_min, soc_max]（由 processor_settings.json 設定）
         for i in self._sto_ids:
             sto = self._sto_map[i]
             self._charge_b[i] = {
@@ -229,10 +241,13 @@ class VppMilpFormulator:
                 for t in T
             }
 
-        # Sell[t]: Grid sales power
+        # Sell[t]：t 時刻賣給市場的電量（MWh），≥ 0
+        # 同時也是 Phase 3 可重導向給 sporadic/aperiodic 的 reserve 上限
         self._Sell = {t: pulp.LpVariable(f"Sell_{t}", lowBound=0) for t in T}
 
-        # x[job][t]: Job active state binaries (for regular jobs only)
+        # x[job][t]：job j 在 t 時刻是否正在執行（1=執行, 0=未執行）
+        # 只對普通 job 定義（充電 job 不需要 x，由 k 直接控制）
+        # 只在 job 的 [release, deadline] 區間內定義
         for job in self._regular_jobs:
             self._x[job.job_id] = {
                 t: pulp.LpVariable(f"x_{job.job_id}_{t}", cat="Binary")
@@ -247,16 +262,26 @@ class VppMilpFormulator:
         battery against running generators. The term is zero (and absent) under the
         Level 1 default.
         """
+        # 目標函數：min F = f2 + f3（Level 1 不含 f1，因為 periodic job 必須全完成）
+        #
+        # f2 = Σ_{i∈generators} Σ_t (cost_fixed * u[i][t] + cost_variable * P[i][t])
+        #      發電機的固定開機成本（每拍開著就計費）+ 可變發電成本（和輸出量成正比）
         f2 = pulp.lpSum(
             self._gen_map[i].cost_fixed * self._u[i][t]
             + self._gen_map[i].cost_variable * self._P[i][t]
             for i in self._gen_ids
             for t in self._time_steps
         )
+        # f3 = -Σ_t (price[t] * Sell[t])
+        #      市場售電收益取負值（因為是最小化問題，賣越多目標值越小，等同最大化收益）
         f3 = -pulp.lpSum(
             self._price_map[t] * self._Sell[t] for t in self._time_steps
         )
         objective = f2 + f3
+
+        # Level 2 選項：加入電池老化成本
+        # aging_cost * Σ P[storage][t]（放電量越多，老化成本越高）
+        # 預設 aging_cost=0，不影響 Level 1 結果
         if self._relax.aging_cost > 0.0:
             # R-aging: battery throughput (discharge) aging cost, reusing P[storage].
             objective += pulp.lpSum(
@@ -273,30 +298,31 @@ class VppMilpFormulator:
             window = range(job.release, job.deadline + 1)
 
             for t in window:
+                # 每個 job 在 t 時刻從所有裝置取的電量總和
                 k_sum = pulp.lpSum(
                     self._k[jid][i][t]
                     for i in self._all_device_ids
                     if t in self._k[jid].get(i, {})
                 )
-                # C1: energy demand when active
+                # C1：執行時需要 demand（w）MWh，不執行時為 0
+                # k_sum = demand * x[j][t]
+                # → x=1（執行中）時 k_sum = demand；x=0 時 k_sum = 0
                 self._prob += (
                     k_sum == job.demand * self._x[jid][t],
                     f"C1_demand_{jid}_{t}",
                 )
 
-            # C3: must execute exactly e time steps
+            # C3：job 必須剛好執行 e 個時槽（不多不少）
             self._prob += (
                 pulp.lpSum(self._x[jid][t] for t in window) == job.execution,
                 f"C3_exec_{jid}",
             )
 
-            # C5: non-preemptive jobs must run as a single contiguous block.
-            # Treating x as 0 before release, every 0->1 transition (a "rise")
-            # marks the start of a block; bounding the rises by 1 forces a
-            # single block, given that Sum(x) == e is fixed by C3. The release
-            # tick must be counted as a potential rise -- skipping it lets a
-            # block start at release and a second block slip in later (one rise
-            # + one fall) without being detected.
+            # C5：非可搶佔（preempt=0）的 job 必須連續執行
+            # 做法：統計 x 從 0 變 1 的次數（「起跑」次數），限制 ≤ 1
+            # → 最多只能有一段連續區塊
+            # 技術細節：release 時刻本身也要算一次可能的起跑點，
+            # 否則 solver 可能在 release 開始一段、稍後再插入第二段而不被偵測到
             if not job.preemptive:
                 rises: list[pulp.LpVariable] = []
                 for t in window:
@@ -316,11 +342,13 @@ class VppMilpFormulator:
         """Declares output limits, ramp rates, and min up/down time constraints."""
         for i in self._gen_ids:
             gen = self._gen_map[i]
-            u_initial = 1 if gen.initial_on_time > 0 else 0
-            p_initial = float(gen.initial_energy)
+            # 從 processor_settings.json 讀取排程前的初始狀態
+            u_initial = 1 if gen.initial_on_time > 0 else 0  # 初始是否開機
+            p_initial = float(gen.initial_energy)             # 初始輸出功率
 
             for t in self._time_steps:
-                # C6: output bounds
+                # C6：輸出上下界（開機時 output_min ≤ P ≤ output_max，關機時 P = 0）
+                # u[i][t] 乘以上下界，確保關機時輸出為零
                 self._prob += (
                     self._P[i][t] >= gen.output_min * self._u[i][t],
                     f"C6_lo_{i}_{t}",
@@ -330,7 +358,8 @@ class VppMilpFormulator:
                     f"C6_hi_{i}_{t}",
                 )
 
-                # C7: ramp rate
+                # C7：爬坡率限制（每個 tick 輸出變化量不能超過 ramp rate）
+                # 防止發電機輸出突然大幅跳變（物理限制）
                 p_prev = self._P[i][t - 1] if t > 1 else p_initial
                 self._prob += (
                     self._P[i][t] - p_prev <= gen.ramp_up_rate * self._DELTA_T,
@@ -342,7 +371,10 @@ class VppMilpFormulator:
                     f"C7_dn_{i}_{t}",
                 )
 
-                # Start/stop binaries linking
+                # start/stop 與 u 的關聯：
+                # start[t] - stop[t] = u[t] - u[t-1]
+                # → 開機那拍 start=1；關機那拍 stop=1；其他拍兩者都 0
+                # 同一拍不能同時啟動和關機（start + stop ≤ 1）
                 u_prev = self._u[i][t - 1] if t > 1 else u_initial
                 self._prob += (
                     self._start[i][t] - self._stop[i][t]
@@ -354,7 +386,8 @@ class VppMilpFormulator:
                     f"startstop_excl_{i}_{t}",
                 )
 
-            # C9: min up time
+            # C9：最短開機時間（啟動後至少維持 min_up_time 個 tick）
+            # 啟動後的接下來 ut 個 tick，u 都必須是 1
             ut = gen.min_up_time
             for t in self._time_steps:
                 end = min(t + ut - 1, self._horizon)
@@ -366,7 +399,7 @@ class VppMilpFormulator:
                     f"C9_minup_{i}_{t}",
                 )
 
-            # C10: min down time
+            # C10：最短關機時間（關機後至少維持 min_down_time 個 tick）
             dt = gen.min_down_time
             for t in self._time_steps:
                 end = min(t + dt - 1, self._horizon)
@@ -378,7 +411,8 @@ class VppMilpFormulator:
                     f"C10_mindn_{i}_{t}",
                 )
 
-            # C11: initial up time carry-over
+            # C11：排程前已開機但未達最短開機時間 → 強制繼續開機
+            # 例如排程前已開 2 小時，min_up_time=4，則還需強制開 2 小時
             if gen.initial_on_time > 0:
                 remaining_up = max(0, gen.min_up_time - gen.initial_on_time)
                 for t in range(1, min(remaining_up, self._horizon) + 1):
@@ -387,7 +421,7 @@ class VppMilpFormulator:
                         f"C11_initup_{i}_{t}",
                     )
 
-            # C12: initial down time carry-over
+            # C12：排程前已關機但未達最短關機時間 → 強制繼續關機
             if gen.initial_off_time > 0:
                 remaining_dn = max(0, gen.min_down_time - gen.initial_off_time)
                 for t in range(1, min(remaining_dn, self._horizon) + 1):

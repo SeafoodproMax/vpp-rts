@@ -1,4 +1,5 @@
 import os
+from typing import Optional
 from pydantic import BaseModel
 
 class VppConfig(BaseModel):
@@ -16,8 +17,9 @@ class VppConfig(BaseModel):
     schedule_result_filename: str = "schedule_result.json"
     evaluation_results_filename: str = "evaluation_results.json"
     acceptance_test_log_filename: str = "acceptance_test_log.json"
-    # Demo-provided sporadic / aperiodic jobs merged into the generated task set.
-    demo_jobs_filename: str = "demo_jobs.json"
+    
+    """Demo 時助教會把此檔放在 input/ 資料夾內，以讀檔方式匯入。"""
+    demo_jobs_filename: str = "aperiodic_n_sporadic.json"
 
     # Level 2 (advanced dynamic scheduling) artifacts.
     runtime_config_filename: str = "runtime_config.json"
@@ -29,10 +31,11 @@ class VppConfig(BaseModel):
     # Magic Numbers
     horizon: int = 72
     epsilon: float = 1e-6
-    # Seed for the periodic task-set generator. A fixed seed makes Phase 1
-    # deterministic so the schedule/evaluation/report stay reproducible; set to
-    # None to draw a fresh random task set on every run.
-    task_seed: int = 20260526
+    # Seed for the periodic task-set generator.
+    # None  → 每次執行都產生不同的任務集（隨機）
+    # 整數  → 固定任務集，每次結果完全相同（適合 demo 或報告時使用）
+    # 範例：task_seed: int = 20260526
+    task_seed: Optional[int] = None
     
     @property
     def processor_settings_path(self) -> str:
@@ -60,7 +63,8 @@ class VppConfig(BaseModel):
 
     @property
     def demo_jobs_path(self) -> str:
-        return os.path.join(self.references_dir, self.demo_jobs_filename)
+        # 助教要求放在 input/ 資料夾，與 processor_settings.json 同一層
+        return os.path.join(self.input_dir, self.demo_jobs_filename)
 
     @property
     def runtime_config_path(self) -> str:
