@@ -21,6 +21,15 @@ Coverage by rubric item:
 SKIP items (report-graded sub-items, or checks whose inputs are absent) are
 excluded from the self-grade total.
 
+【使用方式】：
+    python -m src.validator                    # Level 1 自動評分
+    python -m src.validator --level 2          # Level 2 自動評分（動態排程）
+
+【評分邏輯】：
+    每個 CheckResult 包含 item（子項目編號）、max_score（滿分）、
+    score（實際得分）和 violations（違規說明）。
+    PASS → score = max_score；FAIL → score = 0；SKIP → 不計入總分。
+
 Run with::
 
     python -m src.validator
@@ -39,11 +48,10 @@ from dataclasses import dataclass, field
 from typing import Any
 
 
-# Tolerance for floating-point comparisons. The extractor rounds to 4 decimals,
-# so per-tick residuals are tiny; SOC balance can accumulate over the horizon,
-# hence a slightly loose threshold that still catches whole-MWh violations.
+# 浮點數比較容差：Extractor 輸出捨入到 4 位小數，單個 tick 的誤差很小；
+# 但 SOC 平衡誤差會沿 72 個 tick 累積，所以用稍寬的 1e-2 仍能抓到整 MWh 的違規
 _EPS = 1e-2
-_HORIZON = 72
+_HORIZON = 72  # 排程期間：72 小時（ticks）
 
 
 @dataclass
