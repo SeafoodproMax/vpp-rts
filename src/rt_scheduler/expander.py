@@ -29,15 +29,21 @@ class JobExpander:
         expanded_jobs: list[ExpandedJob] = []
 
         for task in tasks.periodic_tasks:
-            k = 0
+            k = 0  # 第幾個週期（第 0 次、第 1 次、...）
             while True:
+                # 絕對釋放時間 = 初始 release time + 第 k 個週期的偏移
                 abs_release = task.r + k * task.p
+                # 絕對 deadline = 釋放時間 + 相對 deadline - 1
+                # （-1 是因為 release 當拍本身也算在 deadline 視窗內）
                 abs_deadline = abs_release + task.d - 1
+
+                # 超出 horizon 就不再展開（只有 deadline ≤ 72 的 job 才納入 MILP）
                 if abs_release > self._horizon or abs_deadline > self._horizon:
                     break
+
                 expanded_jobs.append(
                     ExpandedJob(
-                        job_id=f"{task.task_id}_{k}",
+                        job_id=f"{task.task_id}_{k}",   # 例如 "p1_0", "p1_1"
                         source_task_id=task.task_id,
                         release=abs_release,
                         deadline=abs_deadline,
@@ -61,6 +67,11 @@ class JobExpander:
         Returns:
             A list of charging job instances spanning the entire horizon.
         """
+        # 充電 job 是特殊的：它代表「把電充進儲能設備」的動作。
+        # 與普通 job 不同，它：
+        #   - 跨整個 horizon（release=1, deadline=H，可以任何拍充電）
+        #   - 只能由發電機或再生能源供電（不能從儲能放電再充電）
+        #   - demand=0（充多少由 MILP 自行決定，不是固定需求）
         charging_jobs: list[ExpandedJob] = []
 
         for cj in assets.charging_jobs:
@@ -73,8 +84,8 @@ class JobExpander:
                     execution=self._horizon,
                     demand=0,
                     preemptive=True,
-                    is_charging=True,
-                    target_storage=cj.target_storage,
+                    is_charging=True,          # 標記為充電 job，routing 限制不同
+                    target_storage=cj.target_storage,  # 充進哪個儲能設備
                 )
             )
 

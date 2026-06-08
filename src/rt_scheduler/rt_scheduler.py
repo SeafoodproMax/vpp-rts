@@ -69,19 +69,22 @@ class RTScheduler:
             A dictionary containing 'schedule_result', the per-tick 'reserve'
             mapping, and the acceptance-test 'log' of per-job decisions.
         """
-        # 1. Load configuration and tasks
+        # Step 1：從 JSON 讀取電廠設備、任務集、電價資料
         self._load_data_if_needed()
         assert self._assets is not None
         assert self._tasks is not None
         assert self._prices is not None
 
-        # 2. Expand task rules into concrete timeline jobs
+        # Step 2：把抽象的週期任務展開成具體的 job 實例
+        # 例如 p1（period=12）在 72 小時內會展開成 p1_0, p1_1, ... 等多個 job
+        # 充電 job（儲能充電）也在此展開，橫跨整個 horizon
         expander = JobExpander(horizon=self._horizon)
         regular_jobs = expander.expand_periodic_tasks(self._tasks)
         charging_jobs = expander.expand_charging_jobs(self._assets)
         all_jobs = regular_jobs + charging_jobs
 
-        # 3. Formulate the MILP Optimization Problem
+        # Step 3：建立 PuLP MILP 模型
+        # formulate() 會依序建立決策變數、目標函數、23 條限制式
         formulator = VppMilpFormulator(
             assets=self._assets,
             prices=self._prices,
@@ -90,7 +93,10 @@ class RTScheduler:
         )
         formulator.formulate()
 
-        # 4. Invoke the Solver
+        # Step 4：呼叫 CBC solver 求解
+        # PULP_CBC_CMD 是 PuLP 內建的開源 MILP solver（CBC）
+        # msg=1 → 印出 solver 的求解過程 log
+        # 求解成功 → status = "Optimal"；否則拋出例外
         formulator.prob.solve(pulp.PULP_CBC_CMD(msg=1))
         status = pulp.LpStatus[formulator.prob.status]
         if status != "Optimal":
@@ -98,10 +104,13 @@ class RTScheduler:
 
         print(f"Objective value: {pulp.value(formulator.prob.objective):.2f}")
 
-        # 5. Extract and format results
+        # Step 5：把 solver 的原始變數值解析成人看得懂的 JSON 格式
+        # 每個 tick 輸出 P（各裝置輸出）、k（能量分配）、sell、soc
         extractor = SchedulerResultExtractor(formulator=formulator, eps=self._epsilon)
         result = extractor.extract_results()
 
-        # 6. Redirect the day-ahead reserve to sporadic / aperiodic jobs.
+        # Step 6：Phase 3 — 在 MILP 解出的 reserve 上執行 acceptance test
+        # AcceptanceTester 利用 sell（可重導向的剩餘電量）作為 reserve
+        # 依序處理 sporadic（硬 deadline）和 aperiodic（軟 deadline）任務
         acceptance_tester = AcceptanceTester(schedule_result=result)
         return acceptance_tester.run(self._tasks)

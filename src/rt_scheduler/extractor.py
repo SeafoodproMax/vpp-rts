@@ -46,24 +46,29 @@ class SchedulerResultExtractor:
         """
         results: list[dict[str, Any]] = []
 
+        # 從 formulator 取出 solver 解完後的所有變數
         time_steps = self._formulator.time_steps
         all_device_ids = self._formulator.all_device_ids
         all_jobs = self._formulator.all_jobs
         gen_ren_ids = self._formulator.gen_ren_ids
         sto_ids = self._formulator.sto_ids
 
-        P = self._formulator.P
-        k = self._formulator.k
-        SOC = self._formulator.SOC
-        Sell = self._formulator.Sell
+        P = self._formulator.P       # P[device][t]：裝置輸出（MWh）
+        k = self._formulator.k       # k[job][device][t]：job 從哪個裝置取多少電
+        SOC = self._formulator.SOC   # SOC[storage][t]：儲能的剩餘電量
+        Sell = self._formulator.Sell # Sell[t]：賣給市場的電量（也是 Phase 3 的 reserve）
 
         for t in time_steps:
+            # P：每個裝置在 t 時刻的實際輸出，只記非零值
             p_dict: dict[str, float] = {}
             for i in all_device_ids:
                 v = self._clean(pulp.value(P[i][t]))
                 if v > 0:
                     p_dict[i] = v
 
+            # k：每個 job 在 t 時刻從哪些裝置取了多少電
+            # 充電 job 只能從 gen/renewable 取電（不能從儲能放電後再充）
+            # 普通 job 可以從所有裝置取電
             k_dict: dict[str, dict[str, float]] = {}
             for job in all_jobs:
                 allowed = gen_ren_ids if job.is_charging else all_device_ids
@@ -76,12 +81,15 @@ class SchedulerResultExtractor:
                 if job_alloc:
                     k_dict[job.job_id] = job_alloc
 
+            # SOC：每個儲能設備在 t 時刻的電量狀態
             soc_dict: dict[str, float] = {}
             for i in sto_ids:
                 soc_dict[i] = self._clean(pulp.value(SOC[i][t]))
 
             sell_val = self._clean(pulp.value(Sell[t]))
 
+            # missed_aperiodic / rejected_sporadic 欄位留空，
+            # 等 Phase 3 AcceptanceTester 執行後填入
             results.append(
                 {
                     "t": t,
