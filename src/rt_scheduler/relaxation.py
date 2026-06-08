@@ -55,18 +55,47 @@ class RelaxationConfig(BaseModel):
             regular (non-charging) scheduled jobs take effect.
     """
 
+    # ── 儲能現實模型參數（對應 Level 2 Assumption 12）─────────────────────────
+    # 預設值全部是「no-op」，不影響 Level 1 的結果
+
+    # 充電效率 η_c：充入 1 MWh 的電能，實際進入電池的比例（損耗 = 1 - η_c）
+    # 預設 1.0 = 理想（無損耗）
     charge_efficiency: float = 1.0
+
+    # 放電效率 η_d：從電池取出 1 MWh，實際送到電網的比例
+    # 預設 1.0 = 理想（無損耗）
     discharge_efficiency: float = 1.0
+
+    # 自耗損率 σ：每個 tick SOC 自然減少的比例（電池靜置也會慢慢放電）
+    # 預設 0.0 = 無自耗損
     self_discharge_rate: float = 0.0
+
+    # 循環壽命限制：整個 horizon 內最多放電 cycle_limit × (soc_max - soc_min) MWh
+    # None = 不限制
     cycle_limit: float | None = None
+
+    # SOC 依存功率下限：電量接近極限時，可用充放電功率會線性縮減
+    # 1.0 = 不縮減（任何 SOC 都能全速充放電）
     soc_power_floor: float = 1.0
+
+    # 老化成本：每放電 1 MWh 加入目標函數的懲罰（$/MWh）
+    # 0.0 = 不計老化
     aging_cost: float = 0.0
+
+    # ── 再生能源不確定性參數（對應 Level 2 Assumption 11）──────────────────────
+    # 對日前預測值打折，預留 headroom 避免實際輸出不足
+    # 0.0 = 不打折（完全信任預測）；0.1 = 保守 10%
     renewable_uncertainty_margin: float = 0.0
+
+    # ── Job 優先順序（對應 Level 2 Assumption 5）────────────────────────────────
+    # [(a, b), ...] 表示 job a 必須完整完成後，job b 才能開始執行
+    # 空列表 = 無限制（Level 1 預設）
     precedence: list[tuple[str, str]] = Field(default_factory=list)
 
     @property
     def storage_relaxed(self) -> bool:
         """Whether any storage-realism relaxation is active."""
+        # 任何一個儲能參數偏離預設值，就表示啟用了 Level 2 儲能放寬
         return (
             self.charge_efficiency < 1.0
             or self.discharge_efficiency < 1.0

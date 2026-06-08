@@ -22,6 +22,8 @@ def _load_demo_jobs() -> dict:
         A dict with ``sporadic`` and ``aperiodic`` sections (empty when the
         demo file is absent).
     """
+    # 助教 demo 時會把 aperiodic_n_sporadic.json 放到 input/ 資料夾
+    # 如果檔案不存在（例如一般開發時），就回傳空的 sporadic / aperiodic
     if not os.path.exists(config.demo_jobs_path):
         return {"sporadic": {}, "aperiodic": {}}
     demo = JsonIO.load(config.demo_jobs_path)
@@ -42,8 +44,13 @@ def generate_task_set() -> str:
     Returns:
         Path to the saved task set file.
     """
+    # TaskSetGenerator 依照 horizon/seed 產生 6~10 個週期性任務
+    # seed=None 表示每次隨機，seed=整數表示固定結果（助教 demo 用）
     generator = TaskSetGenerator(horizon=config.horizon, seed=config.task_seed)
     tasks_dict, frame_size = generator.generate()
+
+    # 把助教提供的 sporadic/aperiodic jobs 一起寫入 task_set.json
+    # Phase 3 (AcceptanceTester) 在 RTScheduler.run() 時會讀取這兩個 section
     demo_jobs = _load_demo_jobs()
     output_data = {
         "frame_size": frame_size,
@@ -80,6 +87,12 @@ def run_scheduler(task_set_path: str = _TASK_SET_PATH) -> dict:
     Returns:
         Scheduler output dict with keys ``schedule_result`` and ``reserve``.
     """
+    # RTScheduler.run() 內部會：
+    # 1. 讀取 task_set.json → 展開 periodic jobs（JobExpander）
+    # 2. 呼叫 VppMilpFormulator 建立 MILP 模型（23 個約束）
+    # 3. 呼叫 CBC solver 求解
+    # 4. 用 SchedulerResultExtractor 解析求解結果
+    # 5. 呼叫 AcceptanceTester 處理 sporadic/aperiodic 任務（Phase 3）
     scheduler = RTScheduler(
         processor_settings_path=config.processor_settings_path,
         task_set_path=task_set_path,
@@ -89,9 +102,11 @@ def run_scheduler(task_set_path: str = _TASK_SET_PATH) -> dict:
     )
     result = scheduler.run()
 
+    # schedule_result.json：包含每個 tick 的 P/k/soc/sell 及 Phase 3 標記
     JsonIO.save({"schedule_result": result["schedule_result"]}, _SCHEDULE_PATH)
     print(f"Schedule saved to {_SCHEDULE_PATH}")
 
+    # acceptance_test_log.json：TA 要求的格式，記錄每個 sporadic/aperiodic 任務的接受決策
     JsonIO.save(result["log"], config.acceptance_test_log_path)
     print(f"Acceptance test log saved to {config.acceptance_test_log_path}")
     return result
@@ -128,7 +143,12 @@ def run_evaluator(
 
 
 def _load_runtime_config() -> dict:
-    """Loads runtime_config.json (Level 2), returning ``{}`` when it is absent."""
+    """Loads runtime_config.json (Level 2), returning ``{}`` when it is absent.
+
+    runtime_config.json 包含兩個區塊：
+      "relaxation": {...}  → RelaxationConfig 參數（Level 2 放寬假設）
+      "dynamic": {...}     → AdvancedScheduler 滾動視野參數（重解週期、MIP gap 等）
+    """
     if not os.path.exists(config.runtime_config_path):
         return {}
     return JsonIO.load(config.runtime_config_path)
@@ -232,9 +252,16 @@ def main() -> None:
     Phase 3 (acceptance test) is integrated inside ``run_scheduler()`` via
     ``AcceptanceTester``.  To exercise it, add ``sporadic`` / ``aperiodic``
     tasks to ``output/task_set.json`` after Phase 1 and before Phase 2.
+
+    執行方式（擇一）：
+      poetry run python -m src.main     # 使用 Poetry 環境
+      python -m src.main                # 直接執行
     """
+    # Phase 1：產生週期性任務集，合併 demo sporadic/aperiodic → task_set.json
     task_set_path = generate_task_set()
+    # Phase 2+3：MILP 求解 + AcceptanceTester → schedule_result.json + acceptance_test_log.json
     run_scheduler(task_set_path)
+    # Phase 4：評估排程品質 → evaluation_results.json
     run_evaluator()
 
 

@@ -440,12 +440,16 @@ class VppMilpFormulator:
         an over-forecast, giving ``P[i][t] <= capacity * forecast * (1 - beta) * dt``.
         beta = 0 reproduces C13 exactly.
         """
+        # keep = (1 - β)：beta=0 時 keep=1.0，等同 Level 1 不打折
+        # beta=0.1 → 只用預測值的 90%，保留 10% headroom 給實際輸出偏低的情況
         keep = 1.0 - self._relax.renewable_uncertainty_margin
         for i in self._ren_ids:
-            cap = self._capacity_map[i]
-            forecasts = self._forecast_map[i]
+            cap = self._capacity_map[i]          # 再生能源裝置容量（最大 MWh）
+            forecasts = self._forecast_map[i]    # 每個 tick 的發電比例（0~1）
             for t in self._time_steps:
                 forecast = forecasts.get(t, 0.0)
+                # C13：P[i][t] ≤ capacity × forecast × (1-β)
+                # → 再生能源輸出不能超過當前預測的（打折後）上限
                 self._prob += (
                     self._P[i][t] <= cap * forecast * keep * self._DELTA_T,
                     f"C13_rencap_{i}_{t}",
@@ -471,25 +475,27 @@ class VppMilpFormulator:
           ``cycle_limit * (soc_max - soc_min)``.
         """
         relax = self._relax
-        eta_c = relax.charge_efficiency
-        eta_d = relax.discharge_efficiency
-        sigma = relax.self_discharge_rate
-        floor = relax.soc_power_floor
+        eta_c = relax.charge_efficiency    # 充電效率 η_c（預設 1.0=無損耗）
+        eta_d = relax.discharge_efficiency # 放電效率 η_d（預設 1.0=無損耗）
+        sigma = relax.self_discharge_rate  # 自耗損率 σ（預設 0.0=無靜置損耗）
+        floor = relax.soc_power_floor      # SOC 依存功率下限（預設 1.0=不縮減）
 
         for i in self._sto_ids:
             sto = self._sto_map[i]
-            chg_jid = self._storage_charging_job[i]
-            usable = float(sto.soc_max - sto.soc_min)
+            chg_jid = self._storage_charging_job[i]  # 對應此儲能的充電 job ID
+            usable = float(sto.soc_max - sto.soc_min)  # 可用 SOC 範圍（MWh）
 
             for t in self._time_steps:
-                # C14: discharge cap
+                # C14：放電上限（開放電時 P ≤ discharge_max；關放電時 P = 0）
+                # discharge_b[i][t]=1 表示本時槽正在放電
                 self._prob += (
                     self._P[i][t]
                     <= sto.discharge_max * self._DELTA_T * self._discharge_b[i][t],
                     f"C14_discap_{i}_{t}",
                 )
 
-                # C15: charge cap
+                # C15：充電上限（charge_in ≤ charge_max，charge_b=1 表示正在充電）
+                # charge_in = 從所有發電機/再生能源流入儲能的電量總和
                 charge_in = pulp.lpSum(
                     self._k[chg_jid][dev][t]
                     for dev in self._gen_ren_ids
@@ -501,11 +507,14 @@ class VppMilpFormulator:
                     f"C15_chgcap_{i}_{t}",
                 )
 
+                # t=1 時使用初始 SOC；之後用上一拍的 SOC 變數
                 soc_prev = (
                     self._SOC[i][t - 1] if t > 1 else float(sto.soc_init)
                 )
 
-                # C16: SOC balance (with efficiency + self-discharge when relaxed)
+                # C16：SOC 能量平衡（Level 2 加入效率與自耗損）
+                # SOC[t] = (1-σ)·SOC[t-1] + η_c·charge_in - (1/η_d)·P
+                # Level 1 預設：σ=0, η_c=1, η_d=1 → SOC[t] = SOC[t-1] + charge_in - P
                 self._prob += (
                     self._SOC[i][t]
                     == (1.0 - sigma) * soc_prev
@@ -514,20 +523,26 @@ class VppMilpFormulator:
                     f"C16_socbal_{i}_{t}",
                 )
 
-                # C18: discharge limited by usable stored energy
+                # C18：放電量不能超過「當前可用 SOC」
+                # 放電實際消耗電池量 = P / η_d（效率損耗）
+                # 可用量 = (1-σ)·SOC_prev - soc_min（扣掉下限後才能用）
                 self._prob += (
                     (1.0 / eta_d) * self._P[i][t]
                     <= (1.0 - sigma) * soc_prev - sto.soc_min,
                     f"C18_dislim_{i}_{t}",
                 )
 
-                # C19: no simultaneous charge/discharge
+                # C19：同一拍不能同時充電和放電（物理限制）
+                # charge_b + discharge_b ≤ 1 確保兩者互斥
                 self._prob += (
                     self._charge_b[i][t] + self._discharge_b[i][t] <= 1,
                     f"C19_nosim_{i}_{t}",
                 )
 
-                # R-soc-dis / R-soc-chg: SOC-dependent power limit (taper to floor).
+                # Level 2 選項：SOC 依存功率縮減（soc_power_floor < 1.0 時才生效）
+                # 電量接近極限時，可用充放電功率線性縮減到 floor 倍
+                # 放電：電量越低（SOC 接近 soc_min），放電功率越受限
+                # 充電：電量越高（SOC 接近 soc_max），充電功率越受限
                 if floor < 1.0 and usable > 0:
                     dis_factor = floor + (1.0 - floor) * (
                         (soc_prev - sto.soc_min) / usable
@@ -545,7 +560,9 @@ class VppMilpFormulator:
                         f"Rsocchg_{i}_{t}",
                     )
 
-            # R-cycle: throughput limit over the whole horizon (reuses P[storage]).
+            # Level 2 選項：循環壽命限制（cycle_limit 非 None 時才生效）
+            # 整個排程期間，儲能的總放電量不能超過 cycle_limit × usable
+            # 例如 cycle_limit=100, usable=10 → 最多放電 1000 MWh
             if relax.cycle_limit is not None and usable > 0:
                 self._prob += (
                     pulp.lpSum(self._P[i][t] for t in self._time_steps)
@@ -556,10 +573,13 @@ class VppMilpFormulator:
     def _add_power_balance_constraints(self) -> None:
         """Declares grid-level power balance and device routing limitations."""
         for t in self._time_steps:
+            # total_supply：所有裝置（發電機 + 再生能源 + 儲能放電）在 t 時刻的總輸出
             total_supply = pulp.lpSum(
                 self._P[i][t] for i in self._all_device_ids
             )
 
+            # total_k：所有 job 在 t 時刻從所有裝置取用的電量總和
+            # 充電 job 只能從 gen/renewable 取電（is_charging → gen_ren_ids only）
             total_k = pulp.lpSum(
                 self._k[job.job_id][i][t]
                 for job in self._all_jobs
@@ -569,13 +589,16 @@ class VppMilpFormulator:
                 if t in self._k[job.job_id].get(i, {})
             )
 
-            # C23: power balance
+            # C23：全系統電力平衡（每個 tick 供需必須完全平衡）
+            # total_supply = total_k（所有 job 用電）+ Sell[t]（賣給市場）
+            # 不能有電力盈餘或不足，Sell 是「剩餘電量賣市場」的緩衝
             self._prob += (
                 total_supply == total_k + self._Sell[t],
                 f"C23_balance_{t}",
             )
 
-            # C20: device output covers its allocations
+            # C20：每台裝置的輸出 P[i][t] 必須 ≥ 從它取走的電量總和
+            # 防止 solver 讓某台裝置被多個 job 超額使用
             for i in self._all_device_ids:
                 alloc = pulp.lpSum(
                     self._k[job.job_id][i][t]
@@ -599,13 +622,19 @@ class VppMilpFormulator:
         This reuses the Level 1 activity variable ``x`` and adds no new variable.
         Pairs referencing a non-regular or unknown job ID are skipped.
         """
+        # 無優先順序設定 → 直接返回，不加任何約束（Level 1 行為）
         if not self._relax.precedence:
             return
+        # 建立 job_id → 執行時間的對照表，用來確認 job a 的 e_a
         exec_of = {job.job_id: job.execution for job in self._regular_jobs}
         for a, b in self._relax.precedence:
+            # 跳過不存在的 job（充電 job 沒有 x 變數，也不受 precedence 限制）
             if a not in self._x or b not in self._x or a not in exec_of:
                 continue
             e_a = exec_of[a]
+            # 對 job b 的每個執行時槽 t：job a 必須在 t 之前已經完整執行 e_a 個 tick
+            # e_a × x[b][t] ≤ Σ_{s<t} x[a][s]
+            # 若 x[b][t]=1（b 正在執行），右側必須 ≥ e_a（a 已完整完成）
             for t in self._x[b]:
                 self._prob += (
                     e_a * self._x[b][t]
@@ -623,8 +652,13 @@ class VppMilpFormulator:
         available to accept sporadic/aperiodic jobs at acceptance time. It reuses the
         Level 1 ``Sell`` variable and adds no new variable.
         """
+        # reserve_floor[t]：Phase 3 AcceptanceTester 要求「日前排程必須在 t 時刻
+        # 保留至少這麼多 MWh 的可重導向剩餘（以 Sell 為緩衝）」
+        # 這樣 Phase 3 才能把 Sell 的電量「轉給」sporadic/aperiodic job 使用
+        # reserve_floor 為空（預設）→ 此函數不加任何約束，Sell 完全由 MILP 決定
         for t, floor in self._reserve_floor.items():
             if floor > 0 and t in self._Sell:
+                # Sell[t] ≥ floor：強制留出至少 floor MWh 給 Phase 3 接受測試用
                 self._prob += (
                     self._Sell[t] >= floor,
                     f"Rreserve_{t}",
@@ -654,6 +688,7 @@ class VppMilpFormulator:
         """
 
         def _pin(var: pulp.LpVariable, value: float) -> None:
+            """將連續變數夾緊在 [value-tol, value+tol]，並保持原本的上下界。"""
             low, up = value - tol, value + tol
             if var.lowBound is not None:
                 low = max(low, var.lowBound)
@@ -662,16 +697,22 @@ class VppMilpFormulator:
             var.bounds(low, up)
 
         def _fix_bin(var: pulp.LpVariable, on: bool) -> None:
+            """將二元變數固定為 1（開）或 0（關）。"""
             var.bounds(1, 1) if on else var.bounds(0, 0)
 
+        # 只凍結 t < upto_tick 的時槽（已執行的部分）
+        # t >= upto_tick 的時槽仍讓 solver 自由優化（未來的部分）
         for t in self._time_steps:
             if t >= upto_tick:
                 continue
             rec = committed_by_tick.get(t, {})
             p_vals = rec.get("P", {})
+
+            # 凍結所有裝置的 P[i][t]（連續輸出變數）
             for i in self._all_device_ids:
                 _pin(self._P[i][t], float(p_vals.get(i, 0.0)))
 
+            # 凍結所有 job 在各裝置的電量分配 k[job][device][t]
             k_vals = rec.get("k", {})
             for job in self._all_jobs:
                 alloc = k_vals.get(job.job_id, {})
@@ -679,20 +720,25 @@ class VppMilpFormulator:
                     if t in var_by_t:
                         _pin(var_by_t[t], float(alloc.get(i, 0.0)))
 
+            # 凍結儲能的 SOC[i][t]（確保下一個 window 的初始 SOC 正確接續）
             soc_vals = rec.get("soc", {})
             for i in self._sto_ids:
                 if i in soc_vals:
                     _pin(self._SOC[i][t], float(soc_vals[i]))
 
+            # 凍結售電量 Sell[t]
             if "sell" in rec:
                 _pin(self._Sell[t], float(rec["sell"]))
 
-            # Fix prefix binaries from the committed continuous state so presolve
-            # can eliminate the frozen window.
+            # 從已凍結的連續變數推導二元變數並固定
+            # 讓 CBC presolve 能夠完整消除（collapse）已凍結的前綴，加速重解
             for i in self._gen_ids:
+                # 發電機：P > 0 → u=1（開機），否則 u=0（關機）
                 _fix_bin(self._u[i][t], float(p_vals.get(i, 0.0)) > tol)
             for i in self._sto_ids:
+                # 儲能：P > 0 → 正在放電
                 _fix_bin(self._discharge_b[i][t], float(p_vals.get(i, 0.0)) > tol)
+                # 儲能：充電 job 的 k 總量 > 0 → 正在充電
                 chg_jid = self._storage_charging_job.get(i)
                 charge_in = sum(
                     k_vals.get(chg_jid, {}).values()
@@ -700,5 +746,6 @@ class VppMilpFormulator:
                 _fix_bin(self._charge_b[i][t], charge_in > tol)
             for job in self._regular_jobs:
                 if t in self._x.get(job.job_id, {}):
+                    # 普通 job：該 job 在 t 有分到電量 → x=1（正在執行）
                     k_sum = sum(k_vals.get(job.job_id, {}).values())
                     _fix_bin(self._x[job.job_id][t], k_sum > tol)

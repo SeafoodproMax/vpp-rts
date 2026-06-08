@@ -115,6 +115,8 @@ class Evaluator:
 
         A job j is considered active at time t if any device allocation k[j][i][t] > 0.
         """
+        # completion time = job 最後一次有電量分配（k > 0）的時槽
+        # 因為 schedule 按 t 順序排列，每次覆蓋就會取到最大的 t
         completion_times: dict[str, int] = {}
         for record in schedule:
             t = record["t"]
@@ -161,14 +163,18 @@ class Evaluator:
         completion_times = self._compute_completion_times(schedule)
         rejected_sporadic = self._collect_rejected_sporadic(schedule)
 
-        # Missed aperiodic: union of schedule records + jobs not completed by deadline
+        # missed_aperiodic：從 schedule 的標記收集 + 補上「完成時間超過 deadline」的情況
+        # 兩種方式取聯集，確保不漏掉任何軟誤點
         missed_aperiodic = self._collect_schedule_missed_aperiodic(schedule)
         for job in aperiodic_jobs:
             ct = completion_times.get(job["job_id"])
             if ct is None or ct > job["deadline"]:
                 missed_aperiodic.add(job["job_id"])
 
-        # ---- Hard deadline miss rate (periodic + sporadic) ----
+        # ── 硬 deadline 誤點率（periodic + sporadic 合併計算）──────────────────
+        # 作業規格：miss_rate = 誤點 job 數 / 總 job 數
+        # sporadic：被拒絕（rejected_sporadic）= 硬誤點
+        # periodic：completion_time > deadline 或根本沒有 completion_time = 硬誤點
         hard_miss = 0
         for job in periodic_jobs:
             ct = completion_times.get(job["job_id"])
@@ -177,32 +183,35 @@ class Evaluator:
         for job in sporadic_jobs:
             jid = job["job_id"]
             if jid in rejected_sporadic:
-                hard_miss += 1
+                hard_miss += 1  # 被 AcceptanceTester 拒絕
             else:
                 ct = completion_times.get(jid)
                 if ct is None or ct > job["deadline"]:
-                    hard_miss += 1
+                    hard_miss += 1  # 接受後仍超過 deadline
         total_hard = len(periodic_jobs) + len(sporadic_jobs)
         hard_deadline_miss_rate = hard_miss / total_hard if total_hard > 0 else 0.0
 
-        # ---- Soft deadline miss rate (aperiodic) ----
+        # ── 軟 deadline 誤點率（aperiodic）────────────────────────────────────
+        # 軟誤點不是錯誤，只是紀錄「晚了多少」
         soft_miss_count = len(missed_aperiodic)
         total_soft = len(aperiodic_jobs)
         soft_deadline_miss_rate = (
             soft_miss_count / total_soft if total_soft > 0 else 0.0
         )
 
-        # ---- Tardiness and response time ----
-        # Scope: all scheduled non-charging jobs (rejected sporadic excluded).
+        # ── Tardiness（延遲）與 Response time（回應時間）────────────────────────
+        # Tardiness_j = max(0, Cj - deadline_j)   → 超過 deadline 才計，準時則為 0
+        # Response_j  = Cj - release_j            → 從釋放到完成的總時間
+        # 範圍：所有有完成時間的 job（排除被拒絕的 sporadic）
         tardiness_list: list[float] = []
         response_time_list: list[float] = []
         for job in periodic_jobs + sporadic_jobs + aperiodic_jobs:
             jid = job["job_id"]
             if jid in rejected_sporadic:
-                continue
+                continue  # 被拒絕的 sporadic 不納入（沒有 completion time）
             ct = completion_times.get(jid)
             if ct is None:
-                continue
+                continue  # 完全沒排到也跳過
             tardiness_list.append(max(0.0, ct - job["deadline"]))
             response_time_list.append(float(ct - job["release"]))
 
@@ -215,9 +224,10 @@ class Evaluator:
             max(response_time_list) if response_time_list else 0.0
         )
 
-        # ---- Completion-time jitter ----
-        # Per periodic task: peak-to-peak (max - min) of completion times across
-        # instances. Averaged over all tasks that have >= 2 scheduled instances.
+        # ── Completion-time jitter（完成時間抖動）────────────────────────────
+        # 衡量同一個 periodic task 各個 instance 完成時間的穩定性
+        # jitter_per_task = max(Cj) - min(Cj)，取所有 task 的平均
+        # 只計算有 ≥ 2 個 instance 完成的 task（只有 1 個無法算 peak-to-peak）
         task_ct_map: dict[str, list[int]] = {}
         for job in periodic_jobs:
             ct = completion_times.get(job["job_id"])
@@ -232,7 +242,9 @@ class Evaluator:
             statistics.mean(jitter_per_task) if jitter_per_task else 0.0
         )
 
-        # ---- Sporadic value rate ----
+        # ── Sporadic value rate（Sporadic 價值率）────────────────────────────
+        # = 在 deadline 前完成的 sporadic 執行時間 / 所有 sporadic 的總執行時間
+        # 被拒絕或超過 deadline 的不算
         total_sporadic_exec = sum(j["execution"] for j in sporadic_jobs)
         completed_exec = sum(
             j["execution"]
@@ -244,9 +256,9 @@ class Evaluator:
             completed_exec / total_sporadic_exec if total_sporadic_exec > 0 else 0.0
         )
 
-        # ---- Generator cost ----
-        # f2 = Σ_{i∈Ig} Σ_{t∈T} (cost_fixed_i·min(1,P_i,t) + cost_variable_i·P_i,t)
-        # When P_i,t > 0: min(1, P_i,t) = 1 → cost = cost_fixed + cost_variable * P
+        # ── Generator cost（發電成本 f2）─────────────────────────────────────
+        # f2 = Σ_{i∈Ig} Σ_t (cost_fixed · 1{P>0} + cost_variable · P)
+        # 開機就計固定成本（不管輸出多少），輸出量再乘可變成本
         gen_params = {
             g.generator_id: (g.cost_fixed, g.cost_variable)
             for g in assets.generators
@@ -257,18 +269,20 @@ class Evaluator:
             for gen_id, (cf, cv) in gen_params.items():
                 p_val = p_vals.get(gen_id, 0.0)
                 if p_val > 0:
-                    generator_cost += cf + cv * p_val
+                    generator_cost += cf + cv * p_val  # 固定成本 + 可變成本
 
-        # ---- Market revenue ----
-        # Σ_{t∈T} (λ_t · Sell_t)
+        # ── Market revenue（售電收益 f3 的原始值）────────────────────────────
+        # revenue = Σ_t (λ_t · Sell_t)，λ_t 為 t 時刻的市場電價
         price_map = {pr.hour: pr.market_price for pr in prices.price}
         market_revenue = 0.0
         for record in schedule:
             sell = record.get("sell", 0.0)
             market_revenue += price_map.get(record["t"], 0) * sell
 
-        # ---- Objective value ----
-        # F = α·f1 + f2 + f3 where f3 = -market_revenue
+        # ── Objective value（目標函數值）────────────────────────────────────
+        # F = α·f1 + f2 - revenue
+        # f1 = soft_miss_count（aperiodic 誤點數）；α = 10000 $/miss
+        # 注意：f3 在 MILP 裡是 -revenue（最小化），評估時直接減掉
         objective_value = (
             self.ALPHA * soft_miss_count + generator_cost - market_revenue
         )

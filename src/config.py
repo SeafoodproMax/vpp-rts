@@ -20,6 +20,7 @@ class VppConfig(BaseModel):
     
     """Demo 時助教會把此檔放在 input/ 資料夾內，以讀檔方式匯入。"""
     demo_jobs_filename: str = "aperiodic_n_sporadic.json"
+    #demo_jobs_filename: str = "demo_jobs.json"
 
     # Level 2 (advanced dynamic scheduling) artifacts.
     runtime_config_filename: str = "runtime_config.json"
