@@ -21,7 +21,7 @@ python -m src.main
 Validate the generated artifacts against the Level 1 grading rubric (items 1–3). Standard-library only — no Poetry environment required:
 
 ```bash
-python3 -m src.validator
+python -m src.validator
 ```
 
 Reads `output/task_set.json`, `output/schedule_result.json` and `input/processor_settings.json`, prints a per-item pass/fail report with a self-grade, and exits non-zero on any covered violation.
@@ -29,7 +29,7 @@ Reads `output/task_set.json`, `output/schedule_result.json` and `input/processor
 **Level 2 self-check:**
 
 ```bash
-python3 -m src.validator --level 2
+python -m src.validator --level 2
 ```
 
 Grades the **dynamic** schedule against the full Level 2 rubric: it re-checks every Level 1 item using the *relaxed* storage/renewable constraints, scores item 3 (each relaxed constraint R1–R10, 1 pt, cap 10 — verified by the dynamic schedule actually satisfying it), and item 8-2 (dynamic schedule correctness). It reads `output/schedule_result_dynamic.json`, `output/evaluation_results_dynamic.json`, `runtime_config.json`, and `output/dynamic_run_log.json` (for the realized PV availability and precedence pairs), and prints the static-vs-dynamic comparison for report item 8-3. Report-only sub-items (4-1/4-2, 7-1/7-2 reserve analysis, 8-1, 8-3, and the item-3 modelling write-up) are `SKIP`.
@@ -40,17 +40,17 @@ The full pipeline runs four phases in sequence:
 
 ```
 Phase 1 — Task Generation
-  → output/task_set.json   (periodic tasks; add sporadic/aperiodic entries manually)
+  → output/task_set.json   (periodic tasks + empty sporadic/aperiodic sections)
 
 Phase 2 — Day-Ahead Scheduling (MILP)
   ← input/processor_settings.json
   ← input/price_72hr.json
-  ← output/task_set.json
+  ← output/task_set.json          (merged with input/aperiodic_n_sporadic.json)
   → output/schedule_result.json
 
 Phase 3 — Acceptance Test  (integrated into RTScheduler.run())
   ← reserve computed by Phase 2 solver
-  ← output/task_set.json   (sporadic / aperiodic tasks)
+  ← input/aperiodic_n_sporadic.json  (sporadic / aperiodic demo jobs)
   → output/schedule_result.json  (annotated with rejected_sporadic / missed_aperiodic)
   → output/acceptance_test_log.json  (per-job accept/reject decisions + rationale)
 
@@ -84,7 +84,7 @@ Each task has the following fields:
 | `w` | Energy demand (MWh/h) |
 | `preempt` | `1` = preemptible, `0` = non-preemptive |
 
-The output `task_set.json` also includes empty `sporadic` and `aperiodic` sections. Add entries there before running Phase 2 to exercise the acceptance test.
+The output `task_set.json` also includes empty `sporadic` and `aperiodic` sections. At runtime, `src/main.py` merges in the demo jobs from `input/aperiodic_n_sporadic.json` (sporadic and aperiodic tasks) before solving Phase 2. To use a different demo job file, change `demo_jobs_filename` in `src/config.py`.
 
 ### Phase 2 — Day-Ahead Scheduling
 
@@ -113,7 +113,7 @@ Processes sporadic (hard-deadline) and aperiodic (soft-deadline) jobs using the 
 | `preempt = 1` | May use non-contiguous slots. |
 | `preempt = 0` | Must use one contiguous execution window. |
 
-Accepted/scheduled jobs consume reserve by `w` for each of their `e` execution ticks. To exercise this phase, add sporadic/aperiodic entries to `output/task_set.json` before running Phase 2.
+Accepted/scheduled jobs consume reserve by `w` for each of their `e` execution ticks. The demo jobs are loaded from `input/aperiodic_n_sporadic.json` — replace this file with the TA-provided task file before running.
 
 Every decision is written to `output/acceptance_test_log.json`: a `summary` block (accept/reject and scheduled/missed counts, sporadic value rate, leftover reserve per tick) plus per-job records carrying the chosen slots, completion tick, and a human-readable accept/reject rationale — directly supporting rubric items 4-1 (method) and 4-2 (decision rationality).
 
@@ -141,12 +141,19 @@ Level 2 relaxes three Level 1 assumptions and adds a rolling-horizon dynamic
 scheduler. See **`report_level2.md`** for the full write-up (rubric items 3, 8).
 
 ```bash
+# Full Level 1 pipeline (static only)
+python -m src.main
+
+# Level 2 dynamic scheduler (reads existing output/task_set.json)
+python -m src.advanced_scheduler
+
 # Full comparison pipeline: generate → static (L1) → dynamic (L2) → print comparison
 python -c "from src.main import run_level2; run_level2()"
-
-# Dynamic scheduler only (reads the existing output/task_set.json)
-python -m src.advanced_scheduler
 ```
+
+> **Demo tip:** for a TA demo with a new `aperiodic_n_sporadic.json`, place the file in
+> `input/`, then run `python -m src.main` followed by `python -m src.advanced_scheduler`.
+> This avoids re-generating the task set between the two runs.
 
 - **Relaxed assumptions (`src/rt_scheduler/relaxation.py`, `formulator.py`):** renewable
   forecast uncertainty (derated cap), realistic storage (charge/discharge efficiency,
@@ -161,6 +168,17 @@ python -m src.advanced_scheduler
   and newly arrived sporadic/aperiodic jobs, and admits them by reservation
   feasibility. A MIP gap / time limit keeps each solve tractable.
 
+**Key `runtime_config.json` parameters:**
+
+| Parameter | Default | Effect |
+|---|---|---|
+| `time_limit` | 10 | Max seconds per CBC solve (lower = faster demo) |
+| `gap_rel` | 0.20 | MIP optimality gap tolerance (higher = faster) |
+| `max_solves` | 80 | Maximum solve calls across all rounds |
+| `reopt_interval` | 24 | Ticks between periodic re-optimizations |
+| `renewable_noise_std` | 0.2 | Std dev of PV Gaussian noise |
+| `renewable_deviation_threshold` | 0.25 | PV deviation that triggers an extra re-solve |
+
 Level 2 writes `*_dynamic` artifacts alongside the Level 1 outputs:
 `output/schedule_result_dynamic.json`, `output/evaluation_results_dynamic.json`,
 `output/acceptance_test_log_dynamic.json`, `output/dynamic_run_log.json`.
@@ -170,8 +188,8 @@ Level 2 writes `*_dynamic` artifacts alongside the Level 1 outputs:
 ```
 src/
 ├── main.py                      # Pipeline entry point (run_level2 = L1 + L2 + compare)
-├── config.py                    # Centralised paths and constants
-├── validator.py                 # Level 1 self-check (stdlib only)
+├── config.py                    # Centralised paths and constants (task_seed, demo_jobs_filename)
+├── validator.py                 # Level 1/2 self-check (stdlib only)
 ├── advanced_scheduler.py        # Level 2: rolling-horizon dynamic scheduler
 ├── generator/                   # Phase 1: task set generation
 │   ├── task_set_generator.py
@@ -195,11 +213,14 @@ src/
     └── file_io.py               # JsonIO.load() / JsonIO.save()
 
 input/
-├── processor_settings.json      # VPP asset configuration
-└── price_72hr.json              # 72-hour market price forecast
+├── processor_settings.json      # VPP asset configuration (generators, storage, renewables)
+├── price_72hr.json              # 72-hour market price forecast
+├── aperiodic_n_sporadic.json    # Demo sporadic/aperiodic jobs (replace with TA-provided file)
+└── demo_jobs.json               # Alternative demo job set (set demo_jobs_filename in config.py)
 
 references/
-└── demo_jobs.json               # Sporadic/aperiodic jobs merged into the task set
+├── hw_illustration.md           # Assignment description (Markdown)
+└── hw_illustration.pdf          # Assignment description (PDF)
 
 runtime_config.json              # Level 2 relaxation + dynamic-cadence parameters
 

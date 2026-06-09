@@ -7,7 +7,7 @@ def test_task_system_load():
     """Test loading TaskSystem from the actual input JSON."""
     current_dir = os.path.dirname(__file__)
     project_root = os.path.abspath(os.path.join(current_dir, "../../.."))
-    json_path = os.path.join(project_root, "references", "aperiodic_n_sporadic_template.json")
+    json_path = os.path.join(project_root, "input", "aperiodic_n_sporadic.json")
     
     task_system = TaskSystem.load_from_json(json_path)
     
