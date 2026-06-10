@@ -4,33 +4,30 @@ NCKU Real-Time Systems homework — a Virtual Power Plant (VPP) real-time schedu
 
 ## Quick start
 
-**With Poetry (recommended):**
-```bash
-poetry install
-poetry run main
-```
+Install (pip; with Poetry use `poetry install` instead):
 
-**Without Poetry:**
 ```bash
 pip install pulp pydantic
-python -m src.main
+```
+
+All pipeline commands, in the order you'd typically run them:
+
+```bash
+python -m src.main                                   # Level 1: generate -> schedule -> evaluate
+python -m src.validator                              # Level 1 self-check
+python -m src.advanced_scheduler                     # Level 2: dynamic scheduler (reuses existing output/task_set.json)
+python -m src.validator --level 2                    # Level 2 self-check
+python -c "from src.main import run_level2; run_level2()"  # Level 1 + Level 2 + comparison report, in one go
+python -m pytest                                     # tests
 ```
 
 ## Self-check (Level 1)
 
-Validate the generated artifacts against the Level 1 grading rubric (items 1–3). Standard-library only — no Poetry environment required:
-
-```bash
-python -m src.validator
-```
+`python -m src.validator` validates the generated artifacts against the Level 1 grading rubric (items 1–3). Standard-library only — no Poetry environment required.
 
 Reads `output/task_set.json`, `output/schedule_result.json` and `input/processor_settings.json`, prints a per-item pass/fail report with a self-grade, and exits non-zero on any covered violation.
 
-**Level 2 self-check:**
-
-```bash
-python -m src.validator --level 2
-```
+**Level 2 self-check:** `python -m src.validator --level 2`
 
 Grades the **dynamic** schedule against the full Level 2 rubric: it re-checks every Level 1 item using the *relaxed* storage/renewable constraints, scores item 3 (each relaxed constraint R1–R10, 1 pt, cap 10 — verified by the dynamic schedule actually satisfying it), and item 8-2 (dynamic schedule correctness). It reads `output/schedule_result_dynamic.json`, `output/evaluation_results_dynamic.json`, `runtime_config.json`, and `output/dynamic_run_log.json` (for the realized PV availability and precedence pairs), and prints the static-vs-dynamic comparison for report item 8-3. Report-only sub-items (4-1/4-2, 7-1/7-2 reserve analysis, 8-1, 8-3, and the item-3 modelling write-up) are `SKIP`.
 
@@ -139,17 +136,9 @@ Reads the solved schedule and computes all required performance metrics:
 
 Level 2 relaxes three Level 1 assumptions and adds a rolling-horizon dynamic
 scheduler. See **`report_level2.md`** for the full write-up (rubric items 3, 8).
-
-```bash
-# Full Level 1 pipeline (static only)
-python -m src.main
-
-# Level 2 dynamic scheduler (reads existing output/task_set.json)
-python -m src.advanced_scheduler
-
-# Full comparison pipeline: generate → static (L1) → dynamic (L2) → print comparison
-python -c "from src.main import run_level2; run_level2()"
-```
+The relevant commands are listed in [Quick start](#quick-start) above
+(`python -m src.advanced_scheduler` for the dynamic scheduler alone, or the
+`run_level2()` one-liner for the full L1 → L2 → comparison pipeline).
 
 > **Demo tip:** for a TA demo with a new `aperiodic_n_sporadic.json`, place the file in
 > `input/`, then run `python -m src.main` followed by `python -m src.advanced_scheduler`.
@@ -233,14 +222,4 @@ output/                          # git-ignored, generated at runtime
 ├── acceptance_test_log_dynamic.json
 ├── dynamic_run_log.json                 # per-round re-optimization log
 └── evaluation_results_dynamic.json
-```
-
-## Running tests
-
-```bash
-# With Poetry
-poetry run pytest
-
-# Without Poetry
-python -m pytest
 ```
