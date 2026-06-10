@@ -28,18 +28,18 @@ def test_periodic_task_expansion() -> None:
     expanded_jobs = expander.expand_periodic_tasks(tasks)
 
     # p1 releases at 8, 16, 24, 32, 40, 48, 56, 64 (8 instances).
-    # Next release is 72, absolute deadline is 72 + 4 - 1 = 75 > 72 (filtered out).
+    # Next release is 72: truncated window [72, 72] cannot fit e=4 (dropped).
     # So 8 instances for p1.
-    # p2 releases at 10 (deadline 24), 30 (deadline 44), 50 (deadline 64).
-    # Next release is 70, deadline 70 + 15 - 1 = 84 > 72 (filtered out).
-    # So 3 instances for p2.
-    # Total jobs: 8 + 3 = 11.
-    assert len(expanded_jobs) == 11
+    # p2 releases at 10 (deadline 24), 30 (deadline 44), 50 (deadline 64),
+    # and 70 (absolute deadline 84 truncated to 72; window [70, 72] fits e=2).
+    # So 4 instances for p2.
+    # Total jobs: 8 + 4 = 12.
+    assert len(expanded_jobs) == 12
 
-    # Verify first instance of p1
+    # Verify first instance of p1 (instances are 1-indexed: p1_1 is the first)
     p1_jobs = [j for j in expanded_jobs if j.source_task_id == "p1"]
     assert len(p1_jobs) == 8
-    assert p1_jobs[0].job_id == "p1_0"
+    assert p1_jobs[0].job_id == "p1_1"
     assert p1_jobs[0].release == 8
     assert p1_jobs[0].deadline == 11
     assert p1_jobs[0].execution == 4
@@ -49,14 +49,19 @@ def test_periodic_task_expansion() -> None:
 
     # Verify first instance of p2
     p2_jobs = [j for j in expanded_jobs if j.source_task_id == "p2"]
-    assert len(p2_jobs) == 3
-    assert p2_jobs[0].job_id == "p2_0"
+    assert len(p2_jobs) == 4
+    assert p2_jobs[0].job_id == "p2_1"
     assert p2_jobs[0].release == 10
     assert p2_jobs[0].deadline == 24
     assert p2_jobs[0].execution == 2
     assert p2_jobs[0].demand == 5
     assert p2_jobs[0].preemptive is True
     assert p2_jobs[0].is_charging is False
+
+    # Verify the truncated tail instance of p2
+    assert p2_jobs[3].job_id == "p2_4"
+    assert p2_jobs[3].release == 70
+    assert p2_jobs[3].deadline == 72
 
 
 def test_charging_job_expansion() -> None:

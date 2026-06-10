@@ -1,0 +1,8 @@
+# VPP-RTS day-ahead scheduling pipeline (Phase 1 generate -> Phase 2+3 MILP
+# schedule + acceptance test -> Phase 4 evaluate).
+# Runs every day at 23:00 so the next 72-hour schedule is ready before midnight.
+0 23 * * * cd /Users/max/sysprog/hw/vpp-rts && /usr/bin/env python3 -m src.main >> output/cron.log 2>&1
+
+# Level 2 rolling-horizon dynamic re-scheduling (re-optimizes the remaining
+# horizon every hour using realized renewable output and newly arrived jobs).
+0 * * * * cd /Users/max/sysprog/hw/vpp-rts && /usr/bin/env python3 -m src.advanced_scheduler >> output/cron_dynamic.log 2>&1
