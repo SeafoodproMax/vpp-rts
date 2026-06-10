@@ -88,6 +88,19 @@ class _Job:
     preemptive: bool
 
 
+def _pstdev(values: list[int]) -> float:
+    """Returns the population standard deviation of ``values``.
+
+    Args:
+        values: Sample values (at least one element).
+
+    Returns:
+        The population standard deviation.
+    """
+    mean = sum(values) / len(values)
+    return math.sqrt(sum((v - mean) ** 2 for v in values) / len(values))
+
+
 def _load_json(path: str) -> Any:
     """Loads a JSON file, surfacing parse errors clearly.
 
@@ -207,18 +220,22 @@ class Level1Validator:
         """Expands periodic tasks into concrete jobs (mirrors JobExpander)."""
         jobs: list[_Job] = []
         for tid, t in self._tasks.items():
-            k = 0
+            k = 1  # 1-indexed instance numbering (p1_1 is the first job)
             while True:
-                rel = t["r"] + k * t["p"]
+                rel = t["r"] + (k - 1) * t["p"]
+                if rel > self._horizon:
+                    break
                 dl = rel + t["d"] - 1
-                if rel > self._horizon or dl > self._horizon:
+                window_end = min(dl, self._horizon)
+                if window_end - rel + 1 < t["e"]:
+                    # truncated tail window cannot fit e ticks; later ones are worse
                     break
                 jobs.append(
                     _Job(
                         job_id=f"{tid}_{k}",
                         task_id=tid,
                         release=rel,
-                        deadline=dl,
+                        deadline=window_end,
                         execution=t["e"],
                         demand=t["w"],
                         preemptive=(t["preempt"] == 1),
@@ -319,6 +336,19 @@ class Level1Validator:
                 if any(float(v) > self._eps for v in alloc.values()):
                     completion[job_id] = t
         return completion
+
+    def _executed_slot_counts(self) -> dict[str, int]:
+        """Returns the number of ticks at which each job receives energy.
+
+        A job is completed only when its executed slot count reaches its
+        execution time ``e`` (matching the external checker's convention).
+        """
+        counts: dict[str, int] = {}
+        for t in range(1, self._horizon + 1):
+            for job_id, alloc in self._ticks.get(t, {}).get("k", {}).items():
+                if any(float(v) > self._eps for v in alloc.values()):
+                    counts[job_id] = counts.get(job_id, 0) + 1
+        return counts
 
     def _collect_field(self, field_name: str) -> set[str]:
         """Returns the union of a per-tick list field across all schedule ticks."""
@@ -587,12 +617,14 @@ class Level1Validator:
             return r
 
         completion = self._completion_times()
+        slot_counts = self._executed_slot_counts()
         rejected = self._collect_field("rejected_sporadic")
         total_exec = sum(j.execution for j in sporadic)
         done_exec = sum(
             j.execution
             for j in sporadic
             if j.job_id not in rejected
+            and slot_counts.get(j.job_id, 0) >= j.execution
             and completion.get(j.job_id, self._horizon + 1) <= j.deadline
         )
         rate = done_exec / total_exec if total_exec else 0.0
@@ -669,54 +701,47 @@ class Level1Validator:
         sporadic = self._expand_sporadic_jobs()
         aperiodic = self._expand_aperiodic_jobs()
         completion = self._completion_times()
+        slot_counts = self._executed_slot_counts()
         rejected = self._collect_field("rejected_sporadic")
 
-        # Aperiodic misses: schedule flags plus jobs not done by their deadline.
-        missed_aperiodic = self._collect_field("missed_aperiodic")
-        for job in aperiodic:
+        def _is_missed(job: _Job) -> bool:
+            # Matches the external checker: a job misses when its executed slot
+            # count is below e or its last executed tick exceeds the deadline.
             ct = completion.get(job.job_id)
-            if ct is None or ct > job.deadline:
-                missed_aperiodic.add(job.job_id)
+            if slot_counts.get(job.job_id, 0) < job.execution:
+                return True
+            return ct is not None and ct > job.deadline
 
-        # Hard deadline miss rate over periodic + sporadic jobs.
-        hard_miss = 0
-        for job in periodic:
-            ct = completion.get(job.job_id)
-            if ct is None or ct > job.deadline:
-                hard_miss += 1
-        for job in sporadic:
-            if job.job_id in rejected:
-                hard_miss += 1
-            else:
-                ct = completion.get(job.job_id)
-                if ct is None or ct > job.deadline:
-                    hard_miss += 1
-        total_hard = len(periodic) + len(sporadic)
-        hard_miss_rate = hard_miss / total_hard if total_hard else 0.0
+        # Hard deadline miss rate over periodic + accepted sporadic jobs.
+        # Rejected sporadic jobs are excluded from both numerator and
+        # denominator (matching the external checker).
+        hard_jobs = periodic + [j for j in sporadic if j.job_id not in rejected]
+        hard_miss = sum(1 for job in hard_jobs if _is_missed(job))
+        hard_miss_rate = hard_miss / len(hard_jobs) if hard_jobs else 0.0
 
         total_soft = len(aperiodic)
-        soft_miss_rate = len(missed_aperiodic) / total_soft if total_soft else 0.0
+        soft_miss = sum(1 for job in aperiodic if _is_missed(job))
+        soft_miss_rate = soft_miss / total_soft if total_soft else 0.0
 
-        # Tardiness / response over all scheduled non-rejected jobs.
+        # Tardiness / response over all jobs with at least one executed slot.
         tardiness: list[float] = []
         response: list[float] = []
         for job in periodic + sporadic + aperiodic:
-            if job.job_id in rejected:
-                continue
             ct = completion.get(job.job_id)
             if ct is None:
                 continue
             tardiness.append(max(0.0, ct - job.deadline))
             response.append(float(ct - job.release))
 
-        # Completion-time jitter: peak-to-peak per periodic task (>= 2 instances).
+        # Completion-time jitter: mean of per-periodic-task population standard
+        # deviation of completion times (single-instance tasks contribute 0).
         task_cts: dict[str, list[int]] = {}
         for job in periodic:
             ct = completion.get(job.job_id)
             if ct is not None:
                 task_cts.setdefault(job.task_id, []).append(ct)
         jitter_vals = [
-            max(cts) - min(cts) for cts in task_cts.values() if len(cts) >= 2
+            _pstdev(cts) if len(cts) > 1 else 0.0 for cts in task_cts.values()
         ]
 
         return {

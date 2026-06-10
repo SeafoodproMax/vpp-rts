@@ -29,24 +29,30 @@ class JobExpander:
         expanded_jobs: list[ExpandedJob] = []
 
         for task in tasks.periodic_tasks:
-            k = 0  # 第幾個週期（第 0 次、第 1 次、...）
+            k = 1  # 第幾個 instance（1-indexed，與評分器 p1_1, p1_2, ... 慣例一致）
             while True:
-                # 絕對釋放時間 = 初始 release time + 第 k 個週期的偏移
-                abs_release = task.r + k * task.p
+                # 絕對釋放時間 = 初始 release time + 第 k-1 個週期的偏移
+                abs_release = task.r + (k - 1) * task.p
+                # release 超出 horizon 才停止展開：deadline 超出 horizon 的尾端
+                # instance 仍要納入（評分器要求所有 release ≤ 72 的 instance 都完成）
+                if abs_release > self._horizon:
+                    break
+
                 # 絕對 deadline = 釋放時間 + 相對 deadline - 1
                 # （-1 是因為 release 當拍本身也算在 deadline 視窗內）
                 abs_deadline = abs_release + task.d - 1
-
-                # 超出 horizon 就不再展開（只有 deadline ≤ 72 的 job 才納入 MILP）
-                if abs_release > self._horizon or abs_deadline > self._horizon:
+                # MILP 的執行視窗只能到 horizon 為止
+                window_end = min(abs_deadline, self._horizon)
+                if window_end - abs_release + 1 < task.e:
+                    # 截斷後的視窗塞不下 e 個 tick，之後的 instance 更晚也塞不下
                     break
 
                 expanded_jobs.append(
                     ExpandedJob(
-                        job_id=f"{task.task_id}_{k}",   # 例如 "p1_0", "p1_1"
+                        job_id=f"{task.task_id}_{k}",   # 例如 "p1_1", "p1_2"
                         source_task_id=task.task_id,
                         release=abs_release,
-                        deadline=abs_deadline,
+                        deadline=window_end,
                         execution=task.e,
                         demand=task.w,
                         preemptive=(task.preempt == 1),
