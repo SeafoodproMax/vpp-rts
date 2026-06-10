@@ -21,6 +21,9 @@ src/
 ├── config.py                # VppConfig: centralised paths & magic numbers
 ├── validator.py             # Level 1 self-grading rubric (stdlib only)
 ├── advanced_scheduler.py    # Level 2: AdvancedScheduler rolling-horizon re-optimization
+├── task_generator.py        # Phase 1 entry point (re-exports src/generator classes; TA-required layout)
+├── scheduler.py             # Phase 2+3 entry point (re-exports src/rt_scheduler classes; TA-required layout)
+├── evaluator.py             # Phase 4: Evaluator — reads schedule + inputs → evaluation_results.json
 ├── generator/               # Phase 1: task set generation
 │   ├── task_set_generator.py
 │   ├── frame_size_calculator.py
@@ -32,8 +35,6 @@ src/
 │   ├── expander.py          # JobExpander: periodic tasks → ExpandedJob instances
 │   ├── formulator.py        # VppMilpFormulator: 23 constraints + Level 2 relaxations + pin_prefix
 │   └── extractor.py         # SchedulerResultExtractor: parses solved variables → JSON
-├── evaluator/               # Phase 4: post-schedule metrics computation
-│   └── evaluator.py         # Evaluator: reads schedule + inputs → evaluation_results.json
 ├── model/                   # Pydantic data models (loaded via AppBaseModel.load_from_json)
 │   ├── base/base_model.py   # Base class with _parse template method
 │   ├── asset/               # ProcessorSettingsSystem, Generator, Storage, Renewable, ChargingJob
@@ -45,7 +46,7 @@ src/
 ## Key Domain Concepts
 
 - **Devices** (`I`): generators (`Ig`), renewables (`Ir`), storages (`Ib`) — all defined in `input/processor_settings.json`
-- **Jobs**: periodic tasks expand into concrete jobs with `release = r + k*p`, `deadline = release + d - 1`; only jobs with `deadline <= 72` are included
+- **Jobs**: periodic tasks expand into concrete jobs (1-indexed: `p1_1` is the first instance) with `release = r + (k-1)*p`, `deadline = release + d - 1`; every job with `release <= 72` is included, with its execution window truncated at the horizon (dropped only if the truncated window cannot fit `e` ticks)
 - **Charging jobs**: special jobs that route energy from generators/renewables into storage SOC; they cannot be supplied by storage discharge
 - **Sporadic jobs**: hard-deadline jobs accepted only when remaining reserve can satisfy `e` ticks of demand `w` within `[r, r + d - 1]`
 - **Aperiodic jobs**: soft-deadline jobs scheduled when reserve is available; otherwise marked as missed

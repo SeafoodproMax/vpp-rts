@@ -310,3 +310,10 @@ class Evaluator:
             "market_revenue": round(market_revenue, 2),
             "objective_value": round(objective_value, 2),
         }
+
+
+if __name__ == "__main__":
+    # Phase 4 entry point: python -m src.evaluator
+    from src.main import run_evaluator
+
+    run_evaluator()

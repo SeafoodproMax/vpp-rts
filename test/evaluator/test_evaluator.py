@@ -6,7 +6,7 @@ import tempfile
 
 import pytest
 
-from src.evaluator.evaluator import Evaluator
+from src.evaluator import Evaluator
 
 
 # ---------------------------------------------------------------------------
@@ -82,34 +82,34 @@ def _make_evaluator(tmp: str, task_set: dict, schedule: list) -> Evaluator:
 # ---------------------------------------------------------------------------
 
 
-class TestComputeCompletionTimes:
+class TestComputeExecutedSlots:
     def _make_eval(self) -> Evaluator:
         return Evaluator("", "", "", "", 72)
 
-    def test_returns_last_active_tick(self) -> None:
+    def test_returns_sorted_active_ticks(self) -> None:
         schedule = [
-            {"t": 1, "k": {"p1_0": {"gen_1": 10.0}}, "sell": 0, "soc": {}, "missed_aperiodic": [], "rejected_sporadic": []},
-            {"t": 2, "k": {"p1_0": {"gen_1": 10.0}}, "sell": 0, "soc": {}, "missed_aperiodic": [], "rejected_sporadic": []},
+            {"t": 1, "k": {"p1_1": {"gen_1": 10.0}}, "sell": 0, "soc": {}, "missed_aperiodic": [], "rejected_sporadic": []},
+            {"t": 2, "k": {"p1_1": {"gen_1": 10.0}}, "sell": 0, "soc": {}, "missed_aperiodic": [], "rejected_sporadic": []},
             {"t": 3, "k": {}, "sell": 0, "soc": {}, "missed_aperiodic": [], "rejected_sporadic": []},
         ]
         ev = self._make_eval()
-        cts = ev._compute_completion_times(schedule)
-        assert cts["p1_0"] == 2
+        slots = ev._compute_executed_slots(schedule)
+        assert slots["p1_1"] == [1, 2]
 
     def test_ignores_zero_allocation(self) -> None:
         schedule = [
-            {"t": 1, "k": {"p1_0": {"gen_1": 0.0}}, "sell": 0, "soc": {}, "missed_aperiodic": [], "rejected_sporadic": []},
-            {"t": 2, "k": {"p1_0": {"gen_1": 5.0}}, "sell": 0, "soc": {}, "missed_aperiodic": [], "rejected_sporadic": []},
+            {"t": 1, "k": {"p1_1": {"gen_1": 0.0}}, "sell": 0, "soc": {}, "missed_aperiodic": [], "rejected_sporadic": []},
+            {"t": 2, "k": {"p1_1": {"gen_1": 5.0}}, "sell": 0, "soc": {}, "missed_aperiodic": [], "rejected_sporadic": []},
         ]
         ev = self._make_eval()
-        cts = ev._compute_completion_times(schedule)
-        assert cts["p1_0"] == 2
+        slots = ev._compute_executed_slots(schedule)
+        assert slots["p1_1"] == [2]
 
     def test_job_not_in_schedule_is_absent(self) -> None:
         schedule = [{"t": 1, "k": {}, "sell": 0, "soc": {}, "missed_aperiodic": [], "rejected_sporadic": []}]
         ev = self._make_eval()
-        cts = ev._compute_completion_times(schedule)
-        assert "p1_0" not in cts
+        slots = ev._compute_executed_slots(schedule)
+        assert "p1_1" not in slots
 
     def test_multiple_jobs(self) -> None:
         schedule = [
@@ -117,9 +117,9 @@ class TestComputeCompletionTimes:
             {"t": 2, "k": {"j1": {"gen_1": 10.0}}, "sell": 0, "soc": {}, "missed_aperiodic": [], "rejected_sporadic": []},
         ]
         ev = self._make_eval()
-        cts = ev._compute_completion_times(schedule)
-        assert cts["j1"] == 2
-        assert cts["j2"] == 1
+        slots = ev._compute_executed_slots(schedule)
+        assert slots["j1"] == [1, 2]
+        assert slots["j2"] == [1]
 
 
 class TestCollectRejectedSporadic:
@@ -144,13 +144,13 @@ class TestCollectRejectedSporadic:
 
 class TestEvaluateHardDeadlineMissRate:
     def test_all_periodic_on_time(self) -> None:
-        # p=72 so only p1_0 is expanded: release=1, deadline=6
+        # p=72 so only p1_1 is expanded: release=1, deadline=6
         task_set = _make_task_set(
             periodic={"p1": {"r": 1, "p": 72, "e": 1, "d": 6, "w": 10, "preempt": 1}}
         )
-        # p1_0 completes at t=3 ≤ deadline 6 → no miss
+        # p1_1 completes at t=3 ≤ deadline 6 → no miss
         schedule = [
-            {"t": t, "k": {"p1_0": {"gen_1": 10.0}} if t == 3 else {}, "sell": 0, "soc": {}, "missed_aperiodic": [], "rejected_sporadic": []}
+            {"t": t, "k": {"p1_1": {"gen_1": 10.0}} if t == 3 else {}, "sell": 0, "soc": {}, "missed_aperiodic": [], "rejected_sporadic": []}
             for t in range(1, 73)
         ]
         with tempfile.TemporaryDirectory() as tmp:
@@ -158,19 +158,21 @@ class TestEvaluateHardDeadlineMissRate:
         assert metrics["hard_deadline_miss_rate"] == 0.0
 
     def test_periodic_job_misses_deadline(self) -> None:
-        # p1_0: deadline=6, but completes at t=8 → miss
+        # p1_1: deadline=6, but completes at t=8 → miss
         task_set = _make_task_set(
             periodic={"p1": {"r": 1, "p": 72, "e": 1, "d": 6, "w": 10, "preempt": 1}}
         )
         schedule = [
-            {"t": t, "k": {"p1_0": {"gen_1": 10.0}} if t == 8 else {}, "sell": 0, "soc": {}, "missed_aperiodic": [], "rejected_sporadic": []}
+            {"t": t, "k": {"p1_1": {"gen_1": 10.0}} if t == 8 else {}, "sell": 0, "soc": {}, "missed_aperiodic": [], "rejected_sporadic": []}
             for t in range(1, 73)
         ]
         with tempfile.TemporaryDirectory() as tmp:
             metrics = _make_evaluator(tmp, task_set, schedule).evaluate()
         assert metrics["hard_deadline_miss_rate"] == 1.0
 
-    def test_rejected_sporadic_counted_as_miss(self) -> None:
+    def test_rejected_sporadic_excluded_from_rate(self) -> None:
+        # 與評分器一致：被拒絕的 sporadic 不計入分母也不計入分子，
+        # 只剩被拒絕的 job 時 miss rate 為 0
         task_set = _make_task_set(
             sporadic={"s1": {"r": 1, "e": 1, "d": 5, "w": 10, "preempt": 1}}
         )
@@ -179,6 +181,20 @@ class TestEvaluateHardDeadlineMissRate:
         ] + [
             {"t": t, "k": {}, "sell": 0, "soc": {}, "missed_aperiodic": [], "rejected_sporadic": []}
             for t in range(2, 73)
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            metrics = _make_evaluator(tmp, task_set, schedule).evaluate()
+        assert metrics["hard_deadline_miss_rate"] == 0.0
+
+    def test_accepted_sporadic_miss_counted(self) -> None:
+        # 被接受（未列入 rejected_sporadic）但超過 deadline 的 sporadic 算硬誤點
+        task_set = _make_task_set(
+            sporadic={"s1": {"r": 1, "e": 1, "d": 5, "w": 10, "preempt": 1}}
+        )
+        # s1 deadline = 1 + 5 - 1 = 5，卻在 t=8 才完成 → miss
+        schedule = [
+            {"t": t, "k": {"s1": {"gen_1": 10.0}} if t == 8 else {}, "sell": 0, "soc": {}, "missed_aperiodic": [], "rejected_sporadic": []}
+            for t in range(1, 73)
         ]
         with tempfile.TemporaryDirectory() as tmp:
             metrics = _make_evaluator(tmp, task_set, schedule).evaluate()
@@ -219,7 +235,7 @@ class TestEvaluateTardiness:
             periodic={"p1": {"r": 1, "p": 72, "e": 1, "d": 6, "w": 10, "preempt": 1}}
         )
         schedule = [
-            {"t": t, "k": {"p1_0": {"gen_1": 10.0}} if t == 3 else {}, "sell": 0, "soc": {}, "missed_aperiodic": [], "rejected_sporadic": []}
+            {"t": t, "k": {"p1_1": {"gen_1": 10.0}} if t == 3 else {}, "sell": 0, "soc": {}, "missed_aperiodic": [], "rejected_sporadic": []}
             for t in range(1, 73)
         ]
         with tempfile.TemporaryDirectory() as tmp:
@@ -233,7 +249,7 @@ class TestEvaluateTardiness:
             periodic={"p1": {"r": 1, "p": 72, "e": 1, "d": 6, "w": 10, "preempt": 1}}
         )
         schedule = [
-            {"t": t, "k": {"p1_0": {"gen_1": 10.0}} if t == 9 else {}, "sell": 0, "soc": {}, "missed_aperiodic": [], "rejected_sporadic": []}
+            {"t": t, "k": {"p1_1": {"gen_1": 10.0}} if t == 9 else {}, "sell": 0, "soc": {}, "missed_aperiodic": [], "rejected_sporadic": []}
             for t in range(1, 73)
         ]
         with tempfile.TemporaryDirectory() as tmp:
@@ -249,7 +265,7 @@ class TestEvaluateResponseTime:
             periodic={"p1": {"r": 1, "p": 72, "e": 1, "d": 6, "w": 10, "preempt": 1}}
         )
         schedule = [
-            {"t": t, "k": {"p1_0": {"gen_1": 10.0}} if t == 4 else {}, "sell": 0, "soc": {}, "missed_aperiodic": [], "rejected_sporadic": []}
+            {"t": t, "k": {"p1_1": {"gen_1": 10.0}} if t == 4 else {}, "sell": 0, "soc": {}, "missed_aperiodic": [], "rejected_sporadic": []}
             for t in range(1, 73)
         ]
         with tempfile.TemporaryDirectory() as tmp:
@@ -259,16 +275,17 @@ class TestEvaluateResponseTime:
 
 
 class TestEvaluateCompletionTimeJitter:
-    def test_jitter_is_max_minus_min_of_completion_times(self) -> None:
+    def test_jitter_is_pstdev_of_completion_times(self) -> None:
         # p1: r=1, p=6, e=1, d=6, w=10 → instances within horizon 72
-        # p1_0 release=1,deadline=6; p1_1 release=7,deadline=12
-        # p1_0 completes at t=2; p1_1 completes at t=9 → jitter = 9 - 2 = 7
+        # p1_1 release=1,deadline=6; p1_2 release=7,deadline=12
+        # p1_1 completes at t=2; p1_2 completes at t=9
+        # → jitter = pstdev([2, 9]) = 3.5（與評分器一致：母體標準差）
         task_set = _make_task_set(
             periodic={"p1": {"r": 1, "p": 6, "e": 1, "d": 6, "w": 10, "preempt": 1}}
         )
         k_at = {}
-        k_at[2] = "p1_0"
-        k_at[9] = "p1_1"
+        k_at[2] = "p1_1"
+        k_at[9] = "p1_2"
         schedule = []
         for t in range(1, 13):
             job_id = k_at.get(t)
@@ -276,15 +293,15 @@ class TestEvaluateCompletionTimeJitter:
             schedule.append({"t": t, "k": k_entry, "sell": 0, "soc": {}, "missed_aperiodic": [], "rejected_sporadic": []})
         with tempfile.TemporaryDirectory() as tmp:
             metrics = _make_evaluator(tmp, task_set, schedule).evaluate()
-        assert metrics["completion_time_jitter"] == 7.0
+        assert metrics["completion_time_jitter"] == 3.5
 
     def test_jitter_zero_when_only_one_instance(self) -> None:
-        # p=72 so only p1_0 fits; jitter cannot be computed → 0.0
+        # p=72 so only p1_1 fits; jitter cannot be computed → 0.0
         task_set = _make_task_set(
             periodic={"p1": {"r": 1, "p": 72, "e": 1, "d": 6, "w": 10, "preempt": 1}}
         )
         schedule = [
-            {"t": t, "k": {"p1_0": {"gen_1": 10.0}} if t == 3 else {}, "sell": 0, "soc": {}, "missed_aperiodic": [], "rejected_sporadic": []}
+            {"t": t, "k": {"p1_1": {"gen_1": 10.0}} if t == 3 else {}, "sell": 0, "soc": {}, "missed_aperiodic": [], "rejected_sporadic": []}
             for t in range(1, 73)
         ]
         with tempfile.TemporaryDirectory() as tmp:
