@@ -147,13 +147,13 @@ def test_soc_within_bounds() -> None:
 def test_periodic_jobs_complete_before_deadline() -> None:
     """Each periodic job runs its execution count within its absolute window."""
     schedule = _run()["schedule_result"]
-    # p1: period 3, e=1 -> instances p1_0 (release 1, dl 2) and p1_1 (release 4, dl 5).
+    # p1: period 3, e=1 -> instances p1_1 (release 1, dl 2) and p1_2 (release 4, dl 5).
     active = {}
     for rec in schedule:
         for jid, alloc in rec["k"].items():
             if jid.startswith("p1_") and any(v > 0 for v in alloc.values()):
                 active.setdefault(jid, []).append(rec["t"])
-    for jid, windows in {"p1_0": (1, 2), "p1_1": (4, 5)}.items():
+    for jid, windows in {"p1_1": (1, 2), "p1_2": (4, 5)}.items():
         ticks = active.get(jid, [])
         assert len(ticks) == 1, f"{jid} ran {ticks}, expected 1 tick"
         assert windows[0] <= ticks[0] <= windows[1]
