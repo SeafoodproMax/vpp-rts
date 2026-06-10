@@ -180,6 +180,9 @@ src/
 ├── config.py                    # Centralised paths and constants (task_seed, demo_jobs_filename)
 ├── validator.py                 # Level 1/2 self-check (stdlib only)
 ├── advanced_scheduler.py        # Level 2: rolling-horizon dynamic scheduler
+├── task_generator.py            # Phase 1 entry point (re-exports src/generator; TA-required layout)
+├── scheduler.py                 # Phase 2+3 entry point (re-exports src/rt_scheduler; TA-required layout)
+├── evaluator.py                 # Phase 4 entry point: Evaluator (performance metrics)
 ├── generator/                   # Phase 1: task set generation
 │   ├── task_set_generator.py
 │   ├── frame_size_calculator.py
@@ -191,13 +194,11 @@ src/
 │   ├── expander.py              # Expands tasks → concrete jobs
 │   ├── formulator.py            # Builds PuLP problem (23 constraints + L2 relaxations)
 │   └── extractor.py             # Parses solved variables → JSON + reserve
-├── evaluator/                   # Phase 4: performance metrics
-│   └── evaluator.py
 ├── model/                       # Pydantic data models
 │   ├── base/base_model.py
-│   ├── asset/                   # Generator, Storage, Renewable, ChargingJob
-│   ├── task/                    # PeriodicTask, SporadicTask, AperiodicTask, ExpandedJob
-│   └── market/                  # PriceSystem, PriceRecord
+│   ├── asset/                   # ProcessorSettingsSystem, Generator, Storage, Renewable, ChargingJob
+│   ├── task/                    # rt_task.py (PeriodicTask, SporadicTask, AperiodicTask), ExpandedJob, TaskSystem
+│   └── market/                  # price.py (PriceSystem, PriceRecord)
 └── utils/
     └── file_io.py               # JsonIO.load() / JsonIO.save()
 
